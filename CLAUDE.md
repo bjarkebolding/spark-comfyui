@@ -18,7 +18,10 @@ self-healing.
 
 Author/owner: GitHub `bjarkebolding`. Target repo name: `spark-comfyui`.
 Hardware in use: DGX Spark, hostname `sparky`, install root `~/comfyui-spark/`.
-Current version: **1.0.0** (MIT licensed, shellcheck-clean).
+Current version: **1.1.0** (MIT licensed, shellcheck-clean).
+Published: https://github.com/bjarkebolding/spark-comfyui (v1.0.0 2026-07-10,
+v1.1.0 same day — backup-revert bug fix, runtime-fallback + stuck-clock
+doctor checks, TRITON_PTXAS_PATH, mod-state allowlist).
 
 ## Golden rules (do not regress these)
 
@@ -152,7 +155,8 @@ extra forced-rebuild trigger alongside its own marker/git-rev-drift check.
 
 For Python-source patches use the helpers in `mod_common.sh`:
 `py_patch_file <rel> <tag> <transform.py>` handles the marker/idempotency
-check, a one-time `<file>.spark-orig` backup, and — critically — an
+check, a `<file>.spark-orig` backup (refreshed on every apply so the revert
+below never restores stale upstream code), and — critically — an
 `ast.parse` guard that **reverts the file if the patch would produce invalid
 Python**. The `transform.py` reads source on stdin, writes patched source to
 stdout, and MUST echo input unchanged when its anchor isn't found (that's how
@@ -279,18 +283,37 @@ transform on a fixture and `ast.parse` the result first.
   additionally enable Kitchen's Triton backend as a third NVFP4 path —
   unevaluated on GB10, don't adopt without a field test.
 - Possible future mod candidates from community forums (evaluate, don't adopt
-  blindly): SageAttention 3 (had mosaic artifacts on Spark last checked — see
-  `SAGE_REF` in the GB10 domain knowledge above; bumping past 2.2.x is a
-  deliberate pin change, not automatic), the stardust7700 UMA fork
-  (whole-fork merge via the patch list, opt-in flags).
+  blindly): SageAttention 3 (mosaic artifacts on Spark — as of the 2026-07
+  research round this is now corroborated in SageAttention's own tracker:
+  issues #321 [GB10, the original mosaic report], #334, #340, #357 [active
+  2026-07-09], across GB10/RTX 5060 Ti/5070 Ti, all open — stay on the
+  `SAGE_REF` pin; bumping past 2.2.x is a deliberate pin change, not
+  automatic), the stardust7700 UMA fork (whole-fork merge via the patch
+  list, opt-in flags).
+- Watch list from the 2026-07 research round (re-check periodically):
+  - SageAttention PR #372 (unmerged): Sage2 causal-mask fix for unequal
+    q/kv lengths — the one real 2.2.x-line fix pending upstream; if it
+    merges, that's the trigger to consider a new `SAGE_REF`. Note upstream
+    `main` hasn't moved since our pin (we ARE the tip as of 2026-07-10).
+  - `comfy-aimdo` (new ComfyUI pip dep, multi-threaded model loader built
+    with DGX Spark in mind, PR #13802): touches the memory-loading path —
+    on next install/update, confirm mod 10's anchor still applies.
+  - `comfy-kitchen[cublas]` extra ("for NVFP4 (+Blackwell)"): plain wheel's
+    `120f` family cubins should cover sm_121 per NVIDIA compat docs, but
+    that's a docs claim, not a live test (golden rule 3) — verify on next
+    install. Also: the forum's "comfy-kitchen 0.2.61" claim is NOT a real
+    version; latest is 0.2.18, already pinned by ComfyUI's requirements.txt.
+  - ComfyUI issue #13920 (open): GB10 hang on second sampling pass with
+    `--disable-dynamic-vram` + SageAttention (bisected upstream to commit
+    1ac78180). Documented as a SPARK_STATIC_VRAM caveat in README; if it's
+    fixed upstream, remove the caveat.
 - Consider a GitHub issue template that asks for `spark-comfyui.sh doctor`
   output — for this project that one command is nearly a complete bug report.
 
-## Publishing checklist (not yet done)
+## Release checklist (v1.0.0 shipped 2026-07-10; repeat per release)
 
-1. `chmod +x spark-comfyui.sh` then `git add` it so the mode bit is committed
-   (or `git update-index --chmod=+x`).
+1. `chmod +x spark-comfyui.sh` stays committed (mode bit `100755` in the index).
 2. `git add spark-comfyui.sh mods/ README.md LICENSE .gitignore CLAUDE.md`
-3. Tag `v1.0.0` to match the script's `--version` (bump `VERSION=` in
-   spark-comfyui.sh first if the release should actually be newer).
+3. Bump `VERSION=` in spark-comfyui.sh (+ its header comment + the "Current
+   version" line above), tag `v<VERSION>` to match `--version`.
 4. README clone URL already set to `github.com/bjarkebolding/spark-comfyui`.

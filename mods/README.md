@@ -64,10 +64,12 @@ mod_verify()   { py_marker_present "$MOD_FILE" "$MOD_TAG"; }
 and **must echo the input unchanged if it can't find its anchor** (that's how
 "upstream changed" is detected). The marker string arrives via `$MARKER`.
 
-`py_patch_file` handles everything else: the idempotency check, a one-time
-`.spark-orig` backup, and a post-write `ast.parse` guard that reverts the file
-if the patch would have produced invalid Python. Patches are re-applied after
-every `git pull`, so they self-heal across ComfyUI updates.
+`py_patch_file` handles everything else: the idempotency check, a
+`.spark-orig` backup refreshed on every apply (so it always holds the
+current pre-patch upstream version), and a post-write `ast.parse` guard that
+reverts the file if the patch would have produced invalid Python. Patches
+are re-applied after every `git pull`, so they self-heal across ComfyUI
+updates.
 
 ## Writing a venv-package mod (critical / streaming / stateful)
 
@@ -110,6 +112,13 @@ key's meaning is streaming-specific (it replaces the echoed-stdout status
 line; non-streamed mods keep using the classic echoed-first-token protocol
 from "The contract" above). `50-onnxruntime-gpu` exports `ORT_STATE` this
 way, and is itself streamed too (its wheel download can take a while).
+
+Exported keys are **allowlisted** in the runner (`_export_mod_state` in
+spark-comfyui.sh — currently `SAGE_ACTION` and `ORT_STATE`; `STATUS` is
+handled separately). A key not on the list is silently ignored: this stops a
+mod typo — or a third-party mod — from overwriting arbitrary main-script
+globals like `INSTALL_DIR` mid-run. If your mod needs to hand a new value
+back, add the key to that pattern in the same change (one line, deliberate).
 
 ## Disabling mods
 

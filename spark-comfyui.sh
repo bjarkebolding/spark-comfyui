@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 1.0.0 | License: MIT
+#  Version 1.1.0 | License: MIT
 # =============================================================================
 #  One script for the whole lifecycle, tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory.
@@ -44,7 +44,7 @@
 # =============================================================================
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -260,14 +260,16 @@ _list_mods() {
     | grep -v '/_' | sort
 }
 
-# Reads KEY=value lines a mod wrote via mod_export into our own scope (e.g.
-# SAGE_ACTION, ORT_STATE — read by cmd_update's summary). STATUS= is a
-# reserved key handled separately by _invoke_mod and skipped here.
+# Reads KEY=value lines a mod wrote via mod_export into our own scope.
+# STATUS= is a reserved key handled separately by _invoke_mod and skipped
+# here. Only ALLOWLISTED keys are imported: mods are sourced shell, and an
+# open declare -g channel would let any mod typo (or a third-party mod)
+# silently overwrite main-script globals like INSTALL_DIR or PATH mid-run.
+# Adding a new exported key = extend this pattern (deliberate, one line).
 _export_mod_state() {
   local line
   while IFS= read -r line; do
-    [[ "$line" == STATUS=* ]] && continue
-    [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+    [[ "$line" =~ ^(SAGE_ACTION|ORT_STATE)= ]] || continue
     declare -g "${line%%=*}=${line#*=}"
   done < "$1"
 }
@@ -524,12 +526,19 @@ cmd_run() {
   #  * 4 GB CUDA kernel cache: ~3x faster denoise steps on reruns
   #    (first run compiles PTX->SASS for sm_121, then reuses from disk)
   #  * NCCL P2P off: single GPU, skip the overhead
+  #  * TRITON_PTXAS_PATH: torch's bundled ptxas is pre-CUDA-13 and can't
+  #    target sm_121, so any custom node calling raw triton.jit() fails with
+  #    'no kernel image' unless Triton is pointed at the system CUDA 13
+  #    ptxas (triton-lang/triton#10331 — same root cause the SageAttention
+  #    build already handles for itself in mod_common.sh).
   #  * Deliberately NOT set (measured harmful on GB10):
   #      TORCH_INDUCTOR_FX_GRAPH_CACHE (stale graphs -> wrong output)
   #      PYTORCH_NO_CUDA_MEMORY_CACHING (fragmentation -> OOM)
   #      torch.compile paths (≈0% gain; GPU is compute-bound)
   export CUDA_CACHE_MAXSIZE="${CUDA_CACHE_MAXSIZE:-4294967296}"
   export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
+  [[ -x /usr/local/cuda/bin/ptxas ]] \
+    && export TRITON_PTXAS_PATH="${TRITON_PTXAS_PATH:-/usr/local/cuda/bin/ptxas}"
 
   # Swap + unified memory = silent system freeze under heavy video loads.
   if [[ -n "$(swapon --noheadings 2>/dev/null)" ]]; then
@@ -913,6 +922,45 @@ PY
     && warn "sageattention appears to come from a PyPI wheel, not your local
 build — high shadow risk. Re-run: $0 update" \
     || info "sageattention distribution origin: $sage_origin"
+  # Triton JITs a small C shim per kernel launch; without the dev headers for
+  # the venv's exact Python it fails on EVERY call and ComfyUI silently uses
+  # PyTorch attention instead — up to ~18x slower, no visible error (field
+  # report: NVIDIA forum #375830). The kernel test above passes regardless,
+  # so check the headers and the runtime log separately.
+  local pyminor devpkg
+  pyminor="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)"
+  devpkg="python${pyminor}-dev"
+  if [[ -n "$pyminor" ]] && dpkg -s "$devpkg" >/dev/null 2>&1; then
+    ok "$devpkg present (Triton can JIT — no silent per-call fallback)"
+  elif [[ -n "$pyminor" ]]; then
+    bad "$devpkg MISSING — Triton can't compile its JIT shim, so SageAttention
+        fails per-call and ComfyUI silently uses PyTorch attention (~18x
+        slower). Fix: sudo apt-get install -y $devpkg   then restart"
+  fi
+  # And check the actual runtime evidence in ComfyUI's own log. The live log
+  # is port-suffixed (user/comfyui_<PORT>.log) despite the startup banner
+  # claiming comfyui.log — check both, current session only (not .prev).
+  local comfy_log fb_total fb_benign t b
+  fb_total=0; fb_benign=0
+  for comfy_log in "$INSTALL_DIR/user/comfyui_${PORT}.log" "$INSTALL_DIR/user/comfyui.log"; do
+    [[ -f "$comfy_log" ]] || continue
+    read -r t b <<< "$(sage_fallback_counts "$comfy_log")"
+    fb_total=$((fb_total + t)); fb_benign=$((fb_benign + b))
+  done
+  if [[ -f "$INSTALL_DIR/user/comfyui_${PORT}.log" || -f "$INSTALL_DIR/user/comfyui.log" ]]; then
+    if [[ "$fb_total" -eq 0 ]]; then
+      ok "no runtime SageAttention fallbacks in ComfyUI's log"
+    elif [[ "$fb_total" -eq "$fb_benign" ]]; then
+      info "log shows $fb_benign 'Unsupported head_dim' fallback(s) — benign:"
+      info "  that model's attention exceeds SageAttention's head_dim<=128 limit;"
+      info "  ComfyUI correctly used PyTorch attention for those layers"
+    else
+      bad "$((fb_total - fb_benign)) real SageAttention runtime failure(s) in
+        ComfyUI's log (user/comfyui_${PORT}.log) — Sage is silently falling
+        back to slow PyTorch attention. Check the log's exception text, fix,
+        then restart: $0 run"
+    fi
+  fi
 
   hdr "onnxruntime (preprocessor GPU check)"
   # DWPose/ControlNet preprocessors silently run on CPU if the sm_121 GPU
@@ -982,6 +1030,43 @@ symlink the system libnvrtc over the bundled copy."
   fi
 
   # (ComfyUI-Manager config is verified by mod 30-manager-config below.)
+
+  hdr "GPU clocks (stuck-low check)"
+  # Field-reported GB10 failure mode (NVIDIA forums, Feb-Jul 2026, multiple
+  # independent units): after a prior OOM/power event, SM clocks pin at
+  # 513-721 MHz with NO throttle reason and normal temps — invisible to
+  # telemetry, not clearable via nvidia-smi; only a full power cycle fixes
+  # it. Clocks idle low BY DESIGN, so only a reading under real load means
+  # anything: spin a short matmul and sample the max the GPU reaches.
+  local max_sm=0 clk spin_pid throttle_mask
+  python - <<'PY' >/dev/null 2>&1 &
+import time
+import torch
+x = torch.randn(4096, 4096, device="cuda")
+t0 = time.time()
+while time.time() - t0 < 2.5:
+    x = x @ x
+    torch.cuda.synchronize()
+PY
+  spin_pid=$!
+  for _ in 1 2 3 4 5 6 7 8; do
+    sleep 0.25
+    clk="$(nvidia-smi --query-gpu=clocks.sm --format=csv,noheader,nounits 2>/dev/null | head -1)"
+    if [[ "$clk" =~ ^[0-9]+$ ]] && (( clk > max_sm )); then max_sm=$clk; fi
+  done
+  wait "$spin_pid" 2>/dev/null || true
+  if (( max_sm == 0 )); then
+    info "could not sample SM clocks under load — skipping stuck-clock check"
+  elif (( max_sm < 900 )); then
+    throttle_mask="$(nvidia-smi --query-gpu=clocks_throttle_reasons.active --format=csv,noheader 2>/dev/null | head -1)"
+    bad "SM clock only reached ${max_sm} MHz under load (throttle reasons:
+        ${throttle_mask:-unreadable}) — matches the known GB10 stuck-clock
+        state after a prior OOM/power event. nvidia-smi cannot clear it.
+        Fix: FULL power cycle — shut down, unplug, wait ~10s, reconnect.
+        (Ignore this if you deliberately capped clocks below 900 MHz.)"
+  else
+    ok "SM clock reached ${max_sm} MHz under load — no stuck-clock state"
+  fi
 
   hdr "Driver / CUDA stack (informational)"
   # Driver & CUDA updates have shipped real GB10 perf gains (e.g. CUDA 13.0u2

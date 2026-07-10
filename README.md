@@ -90,12 +90,13 @@ chmod +x spark-comfyui.sh            # make the script executable (first time on
 
 - `CUDA_CACHE_MAXSIZE=4GB` — kernel cache; ~3× faster denoise steps on reruns (first run JITs PTX→SASS for sm_121, then reuses from disk)
 - `NCCL_P2P_DISABLE=1` — single GPU, so P2P negotiation is pure overhead; skip it
+- `TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas` — torch's bundled ptxas can't target sm_121, so custom nodes calling raw `triton.jit()` would fail with "no kernel image"; this points Triton at the system CUDA 13 ptxas instead ([triton#10331](https://github.com/triton-lang/triton/issues/10331))
 - `--disable-pinned-memory` — pinned memory is overhead, not a win, on the unified fabric
 - `--bf16-unet --bf16-vae --bf16-text-enc` — native fast path on GB10 (opt out: `SPARK_BF16=0`)
 - `--use-sage-attention` — only when the build passed live kernel verification
 - `--disable-dynamic-vram` — opt-in (`SPARK_STATIC_VRAM=1`): keep models resident when they fit
 
-**Everything GB10-specific beyond a vanilla install** (auto-applied, re-healed on every update; opt out with `SPARK_SOURCE_PATCHES=0`) lives as self-contained **mods** under [`mods/`](mods/) — each in its own directory with a `run.sh` implementing an `apply`/`verify`/`describe` contract, discovered and run in filename order. That covers three kinds of things: a source patch to ComfyUI's own Python (`10-unified-memory-free` makes `get_free_memory()` read the host-available unified pool instead of the misleading CUDA query — the single most impactful fix when another CUDA process shares the GPU), a config-tree mod (`30-manager-config`, ComfyUI-Manager's `config.ini`), and venv-package steps described in the table above (`05-setuptools-compat`, `20-torch-repair`, `40-sageattention`, `50-onnxruntime-gpu`). Source patches are idempotent, back up the original once (`*.spark-orig`), revert themselves if they'd produce invalid Python, and no-op if upstream changes the code they target. The venv-package mods that can take real time or whose failure genuinely breaks the install (torch repair, the SageAttention build) stream their output live and abort the script loudly on failure rather than degrading silently. Adding your own is a matter of dropping a new directory in `mods/` — see [`mods/README.md`](mods/README.md).
+**Everything GB10-specific beyond a vanilla install** (auto-applied, re-healed on every update; opt out with `SPARK_SOURCE_PATCHES=0`) lives as self-contained **mods** under [`mods/`](mods/) — each in its own directory with a `run.sh` implementing an `apply`/`verify`/`describe` contract, discovered and run in filename order. That covers three kinds of things: a source patch to ComfyUI's own Python (`10-unified-memory-free` makes `get_free_memory()` read the host-available unified pool instead of the misleading CUDA query — the single most impactful fix when another CUDA process shares the GPU), a config-tree mod (`30-manager-config`, ComfyUI-Manager's `config.ini`), and venv-package steps described in the table above (`05-setuptools-compat`, `20-torch-repair`, `40-sageattention`, `50-onnxruntime-gpu`). Source patches are idempotent, keep a pre-patch backup (`*.spark-orig`, refreshed on every apply), revert themselves if they'd produce invalid Python, and no-op if upstream changes the code they target. The venv-package mods that can take real time or whose failure genuinely breaks the install (torch repair, the SageAttention build) stream their output live and abort the script loudly on failure rather than degrading silently. Adding your own is a matter of dropping a new directory in `mods/` — see [`mods/README.md`](mods/README.md).
 - Deliberately **not** used: `--gpu-only` / `--highvram` (fights unified memory), `torch.compile` (≈0 % gain on GB10), inductor FX graph cache (served stale graphs), `PYTORCH_NO_CUDA_MEMORY_CACHING` (causes fragmentation → OOM), Flash Attention (FA3 can't target sm_121; FA2 compiles from source in ~2 h but loses to SDPA on Blackwell — only worth it if a custom node hard-imports `flash_attn`)
 
 ## Patch list (optional)
@@ -126,7 +127,7 @@ All paths and knobs are environment-overridable:
 | `ORT_WHEEL_URL` | community sm_121 wheel | GPU onnxruntime |
 | `PATCH_LIST` | `<script dir>/comfyui-patches.list` | Patch list location |
 | `SPARK_BF16` | `1` | Set `0` to disable forced bf16 flags |
-| `SPARK_STATIC_VRAM` | `0` | Set `1` to keep models resident when they fit (`--disable-dynamic-vram`; faster prompt→image iteration) |
+| `SPARK_STATIC_VRAM` | `0` | Set `1` to keep models resident when they fit (`--disable-dynamic-vram`; faster prompt→image iteration). **Caveat:** open ComfyUI issue [#13920](https://github.com/Comfy-Org/ComfyUI/issues/13920) — on GB10 this flag combined with SageAttention can hang a *second* sampling pass indefinitely (GPU idle, no OOM). If you hit that, unset this. |
 | `SPARK_SOURCE_PATCHES` | `1` | Set `0` to skip **all six GB10 mods** — not just the memory-reporting patch, but also torch repair, SageAttention, onnxruntime, and Manager config |
 
 ComfyUI-Manager is configured automatically (`user/__manager/config.ini`): `network_mode = personal_cloud` (required for full Manager function on a `0.0.0.0` listener), `security_level = normal`, `use_uv = True` (fast node installs), `file_logging = True`, and `downgrade_blacklist` protecting the torch trio. Keys you edit by hand are respected on re-runs (only `network_mode` is re-asserted).
@@ -147,6 +148,7 @@ Every check prints PASS/FAIL and, on failure, the exact command that fixes it. C
 - **Whole machine freezes near memory limit** — swap thrash on unified memory → `tune` (disables swap; you get a clean OOM kill instead).
 - **Manager says an action is not allowed** — lower `security_level` in `ComfyUI/user/__manager/config.ini` temporarily (`normal-` or `weak`), restore it afterward.
 - **Capability warning at startup** (`sm_121 exceeds torch's supported maximum`) — expected on GB10, harmless; PTX JIT covers it.
+- **Spark rebooted mid-update?** The DGX Dashboard's system-update flow always ends in an automatic reboot (no way to disable it). Don't run `spark-comfyui.sh update` in the same window as a system/firmware update — the reboot isn't caused by this tool, but it will interrupt whatever was running.
 
 ## Security notes
 

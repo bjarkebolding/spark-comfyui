@@ -43,6 +43,13 @@
 #                      the mod returns (used to hand state like SAGE_ACTION/
 #                      ORT_STATE back to cmd_update's summary).
 #    MOD_MARKER     -> the canonical "# spark-comfyui:<tag>" marker string
+#
+#  NOT a standalone library: this file is a sourced fragment that assumes the
+#  sourcing shell (spark-comfyui.sh, or a mod subshell inheriting from it)
+#  already provides the print helpers `log`/`warn`/`die` and the globals
+#  `INSTALL_DIR`, `VENV_DIR`, `SAGE_SRC`, `SAGE_REF`, `SAGE_MARKER`,
+#  `TORCH_INDEX`, `ORT_WHEEL_URL`. Sourcing it anywhere else (tests, other
+#  scripts) requires stubbing those first.
 # =============================================================================
 
 # Marker embedded in patched files so apply/verify are idempotent.
@@ -61,8 +68,9 @@ mod_export() {
 #   py_patch_file <relpath-under-INSTALL_DIR> <tag> <python-transform-file>
 # The transform file is a python script reading the source on stdin and
 # writing the patched source to stdout; it must be a no-op-returning-input
-# when it cannot find its anchor. Handles the marker check, one-time backup
-# (<file>.spark-orig), and reports one of: applied | present | skipped:<why>.
+# when it cannot find its anchor. Handles the marker check, a backup
+# (<file>.spark-orig) refreshed on every apply, and reports one of:
+# applied | present | skipped:<why>.
 py_patch_file() {
   local rel="$1" tag="$2" transform="$3"
   local path="$INSTALL_DIR/$rel"
@@ -75,7 +83,12 @@ py_patch_file() {
   if [[ -z "$out" ]] || [[ "$out" == "$(cat "$path")" ]]; then
     echo "skipped:anchor-not-found"; return 1
   fi
-  [[ -f "$path.spark-orig" ]] || cp -f "$path" "$path.spark-orig"
+  # Refresh the backup on EVERY apply, not just the first: mods re-apply
+  # after each git pull, so a once-only backup goes stale and the revert
+  # below would restore months-old upstream code over the current file.
+  # Safe here — the marker check above already returned, so $path is
+  # guaranteed to be current-upstream, unpatched content.
+  cp -f "$path" "$path.spark-orig"
   printf '%s' "$out" > "$path"
   # Guarantee we never leave invalid Python behind.
   if ! python3 -c "import ast,sys; ast.parse(open('$path',encoding='utf-8').read())" 2>/dev/null; then
@@ -150,6 +163,20 @@ o = sageattn(q, q, q, tensor_layout="HND")
 torch.cuda.synchronize()
 assert o.shape == q.shape and torch.isfinite(o).all()
 PY
+}
+
+# Count per-call SageAttention runtime fallbacks in a ComfyUI log. ComfyUI
+# catches SageAttention exceptions per call and silently uses PyTorch
+# attention instead (comfy/ldm/modules/attention.py), so the build-time
+# kernel test can't see these. Prints "<total> <benign>", where benign =
+# 'Unsupported head_dim' cases (a model-architecture limit, not a fault);
+# total > benign means something real is broken (e.g. Triton's JIT shim
+# failing from a missing python3.X-dev — up to ~18x slower sampling).
+sage_fallback_counts() {
+  local log="$1" total benign
+  total="$(grep -c 'Error running sage attention' "$log" 2>/dev/null || true)"
+  benign="$(grep -c 'Error running sage attention.*Unsupported head_dim' "$log" 2>/dev/null || true)"
+  echo "${total:-0} ${benign:-0}"
 }
 
 # ONNX Runtime GPU check. get_available_providers() is the RELIABLE detector;
