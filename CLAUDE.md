@@ -230,8 +230,10 @@ edits needed. A venv-package mod needs its underlying logic added to
 `INSTALL_DIR`, `VENV_DIR`, `SAGE_SRC`, `SAGE_REF` (pinned SageAttention commit
 — see GB10 domain knowledge), `REPO_URL`, `PORT`, `TORCH_INDEX`,
 `ORT_WHEEL_URL`, `PATCH_LIST`, `MODS_DIR`, `SPARK_BF16` (1),
-`SPARK_STATIC_VRAM` (0), `SPARK_SOURCE_PATCHES` (1) — disables *all six mods*,
-not just source patches, `PIP_RETRIES`, `PIP_DEFAULT_TIMEOUT`.
+`SPARK_STATIC_VRAM` (0) — caveat: with SageAttention this can hang a second
+sampling pass on GB10, open ComfyUI issue #13920, `SPARK_SOURCE_PATCHES` (1)
+— disables *all six mods*, not just source patches, `PIP_RETRIES`,
+`PIP_DEFAULT_TIMEOUT`.
 
 ## Patch list (separate from mods)
 
@@ -305,8 +307,9 @@ transform on a fixture and `ast.parse` the result first.
     version; latest is 0.2.18, already pinned by ComfyUI's requirements.txt.
   - ComfyUI issue #13920 (open): GB10 hang on second sampling pass with
     `--disable-dynamic-vram` + SageAttention (bisected upstream to commit
-    1ac78180). Documented as a SPARK_STATIC_VRAM caveat in README; if it's
-    fixed upstream, remove the caveat.
+    1ac78180). Documented as a SPARK_STATIC_VRAM caveat in the env-var
+    overrides section above (README no longer carries an env-var table —
+    slimmed 2026-07); if it's fixed upstream, remove the caveat.
 - Consider a GitHub issue template that asks for `spark-comfyui.sh doctor`
   output — for this project that one command is nearly a complete bug report.
 
