@@ -1,0 +1,21 @@
+# Everything spark-comfyui.sh installs lives next to the script — none of it
+# belongs in the repo.
+ComfyUI/
+comfyui-env/
+SageAttention/
+
+# Runtime artifacts
+thermal_monitor.log
+
+# Personal patch list (may reference private forks; the script seeds a
+# commented template automatically on first install)
+comfyui-patches.list
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Claude Code's own per-machine local settings (tool-permission allowlist)
+.claude/
