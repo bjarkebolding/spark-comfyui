@@ -2,8 +2,6 @@
 
 **One script to install, run, update, and maintain [ComfyUI](https://github.com/Comfy-Org/ComfyUI) on the NVIDIA DGX Spark (GB10 Grace Blackwell).**
 
-The DGX Spark is not an ordinary CUDA box — aarch64 Grace CPU, an sm_121 GPU most toolchains don't target yet, and 128 GB of unified memory. A generic ComfyUI install either fails outright or runs silently degraded: CPU-only torch, attention kernels quietly falling back, preprocessors on CPU. This script makes all of that boring: every optimization is gated on a live test (never a version string), and everything self-heals on every update. Deep GB10 details live in [CLAUDE.md](CLAUDE.md) and [mods/README.md](mods/README.md).
-
 ## Quick start
 
 Needs: a DGX Spark (GB10) on DGX OS — the NVIDIA driver, CUDA 13.x toolkit, and Python 3.12 all ship with it — plus ~15 GB of disk before models.
@@ -16,7 +14,7 @@ cd spark-comfyui
 ./spark-comfyui.sh run              # UI at http://<spark-ip>:8188
 ```
 
-Everything installs under the directory the script lives in — fully relocatable, idempotent, safe to re-run. `sudo` is only invoked when a system package is missing or a `tune` setting isn't already applied.
+Everything installs under the directory the script lives in — fully relocatable, idempotent, safe to re-run. `sudo` is only invoked when a system package is missing or a `tune` setting isn't already applied. Deep GB10 details live in [CLAUDE.md](CLAUDE.md) and [mods/README.md](mods/README.md).
 
 ## Commands
 
@@ -32,6 +30,113 @@ Everything installs under the directory the script lives in — fully relocatabl
 | `service` | Installs and starts a systemd user service (auto-start, restart-on-failure, survives logout). |
 
 `./spark-comfyui.sh help` prints the full reference; `--version` prints the version.
+
+## What it looks like
+
+A routine `update` — the tool self-updates first, ComfyUI moves forward, every mod re-verifies itself, and the summary says whether a restart is needed:
+
+```console
+$ ./spark-comfyui.sh update
+                          __                              ____            _
+   _________  ____ ______/ /__      _________  ____ ___  / __/_  ____  __(_)
+  / ___/ __ \/ __ `/ ___/ //_/_____/ ___/ __ \/ __ `__ \/ /_/ / / / / / / /
+ (__  ) /_/ / /_/ / /  / ,< /_____/ /__/ /_/ / / / / / / __/ /_/ / /_/ / /
+/____/ .___/\__,_/_/  /_/|_|      \___/\____/_/ /_/ /_/_/  \__, /\__,_/_/
+    /_/                                                   /____/
+  v1.3.0 — ComfyUI on the NVIDIA DGX Spark (GB10 Grace Blackwell)
+
+==> Checking ComfyUI for updates
+ComfyUI master updated: 3f8a12c4 -> b96e02d1
+b96e02d1 Bump frontend version
+77410cf3 Fix mask composite when destination has alpha
+5c19aa08 Speed up latent preview interval
+
+==> Refreshing python dependencies
+[... pip output ...]
+
+==> Applying mods (idempotent, self-healing)
+  = 05-setuptools-compat (already active)
+  = 10-unified-memory-free (already active)
+  = 20-torch-repair (already active)
+  = 30-manager-config (already active) — config OK
+SageAttention: OK — verified, no rebuild needed
+  = 40-sageattention (already active) — verified, no rebuild needed
+onnxruntime: OK — GPU provider live
+  = 50-onnxruntime-gpu (already active) — GPU provider live
+
+==> Update summary
+  ComfyUI:        updated -> b96e02d1
+  Patches:        none
+  SageAttention:  verified (no rebuild needed)
+  Mods:           active: 05-setuptools-compat 10-unified-memory-free 20-torch-repair 30-manager-config 40-sageattention 50-onnxruntime-gpu
+  torch:          2.13.0+cu130 (pins enforced by Manager)
+  onnxruntime:    GPU provider live
+
+Changes applied — restart to pick them up: ./spark-comfyui.sh run
+```
+
+A healthy `doctor` (banner cropped) — every optimization is checked **live**, not by version strings, and any failure names its exact fix:
+
+```console
+$ ./spark-comfyui.sh doctor
+
+== spark-comfyui (self) ==
+  [info] git revision d6d7ab4
+  [info] up to date with the published repo
+
+== PyTorch / GPU (CPU-shadow check) ==
+  torch 2.13.0+cu130 | compiled CUDA 13.0
+  device: NVIDIA GB10 | sm_121
+  [PASS] torch is the cu130 CUDA build and sees the GPU
+  [PASS] pip dependency graph is consistent
+  [info] (ignored benign aarch64 platform-metadata notice for nvidia-*-cu13)
+
+== SageAttention (pip-shadow + kernel-image check) ==
+  [PASS] install-time verification marker present
+  [PASS] live sm_121 kernel runs (local build intact, not shadowed)
+  [info] embedded cubin: sm_121     embedded PTX: sm_121
+  [PASS] extension has an sm_121 path (native cubin and/or PTX fallback)
+  [info] sageattention distribution origin: local
+  [PASS] python3.12-dev present (Triton can JIT — no silent per-call fallback)
+  [PASS] no runtime SageAttention fallbacks in ComfyUI's log
+
+== onnxruntime (preprocessor GPU check) ==
+  [PASS] CUDAExecutionProvider live — preprocessors run on GPU
+
+== comfy-kitchen (NVFP4/FP8 quantization backends) ==
+  [PASS] NVFP4 kernels live on the native CUDA backend (forced + numerically verified)
+
+== NVRTC (GPU-FFT custom-node check) ==
+  [PASS] no bundled NVRTC — torch uses the system CUDA 13 one (libnvrtc.so.13)
+
+== ptxas (sm_121 capability) ==
+  [PASS] ptxas is CUDA >= 13.0 — sm_121-capable (release 13.0)
+
+== Runtime (is the optimization actually active?) ==
+  [PASS] running ComfyUI was launched WITH --use-sage-attention
+
+== GPU clocks (stuck-low check) ==
+  [PASS] SM clock reached 2418 MHz under load — no stuck-clock state
+
+== Driver / CUDA stack (informational) ==
+  [info] driver: 580.95.05   CUDA (driver): 13.0   toolkit (nvcc): 13.0
+  [info] no pending NVIDIA/CUDA apt updates (refresh with: sudo apt update)
+
+== Mods (GB10 fixes & config) ==
+  [PASS] 05-setuptools-compat active — setuptools pinned within torch's declared constraint
+  [PASS] 10-unified-memory-free active — unified-memory-aware get_free_memory() (fixes offload cliff with co-resident CUDA procs)
+  [PASS] 20-torch-repair active — torch CUDA 13 build verified/repaired (install-time + pre-launch guard)
+  [PASS] 30-manager-config active — ComfyUI-Manager config (personal_cloud, uv, downgrade_blacklist)
+  [PASS] 40-sageattention active — SageAttention built natively for sm_121, live-kernel-verified
+  [PASS] 50-onnxruntime-gpu active — GPU onnxruntime (sm_121) for DWPose/ControlNet preprocessors
+
+== Unified-memory safety ==
+  [PASS] swap disabled (clean OOM instead of silent freeze)
+
+== Summary ==
+  20 passed, 0 failed
+  No silent-drift issues detected.
+```
 
 ## Patch list (optional)
 
