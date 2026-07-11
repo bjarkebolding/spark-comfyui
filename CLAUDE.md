@@ -18,11 +18,14 @@ self-healing.
 
 Author/owner: GitHub `bjarkebolding`. Target repo name: `spark-comfyui`.
 Hardware in use: DGX Spark, hostname `sparky`, install root `~/comfyui-spark/`.
-Current version: **1.2.0** (MIT licensed, shellcheck-clean).
+Current version: **1.3.0** (MIT licensed, shellcheck-clean).
 Published: https://github.com/bjarkebolding/spark-comfyui (v1.0.0 2026-07-10,
 v1.1.0 same day — backup-revert bug fix, runtime-fallback + stuck-clock
 doctor checks, TRITON_PTXAS_PATH, mod-state allowlist; v1.2.0 2026-07-11 —
-NVFP4 live doctor gate, self-updating `update`).
+NVFP4 live doctor gate, self-updating `update`; v1.3.0 same day — version
+banner on every invocation, doctor self-version + update-pending probe,
+status version line). NOTE: self-update pulls main HEAD, so pushing to main
+IS releasing — always bump VERSION in the same push.
 
 ## Golden rules (do not regress these)
 

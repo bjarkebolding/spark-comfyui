@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 1.2.0 | License: MIT
+#  Version 1.3.0 | License: MIT
 # =============================================================================
 #  One script for the whole lifecycle, tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory.
@@ -47,7 +47,7 @@
 # =============================================================================
 set -euo pipefail
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -101,6 +101,21 @@ ok()   { printf '  \033[1;32m[PASS]\033[0m %s\n' "$*"; PASS=$((PASS+1)); }
 bad()  { printf '  \033[1;31m[FAIL]\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
 info() { printf '  \033[1;36m[info]\033[0m %s\n' "$*"; }
 hdr()  { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
+
+# ASCII banner (figlet 'slant', 76 cols) — printed once by the dispatch on
+# every invocation except --version, which stays a bare parseable line.
+banner() {
+  printf '\033[1;32m'
+  cat <<'ART'
+                          __                              ____            _
+   _________  ____ ______/ /__      _________  ____ ___  / __/_  ____  __(_)
+  / ___/ __ \/ __ `/ ___/ //_/_____/ ___/ __ \/ __ `__ \/ /_/ / / / / / / /
+ (__  ) /_/ / /_/ / /  / ,< /_____/ /__/ /_/ / / / / / / __/ /_/ / /_/ / /
+/____/ .___/\__,_/_/  /_/|_|      \___/\____/_/ /_/ /_/_/  \__, /\__,_/_/
+    /_/                                                   /____/
+ART
+  printf '\033[0m  \033[1mv%s\033[0m — ComfyUI on the NVIDIA DGX Spark (GB10 Grace Blackwell)\n' "$VERSION"
+}
 
 usage() { awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; }
 
@@ -815,6 +830,7 @@ SWAP=$(free -g | awk '/Swap:/{print $3}')G" | tee -a "$logfile"
                  /Swap:/ {printf "  swap: %s GB total %s\n", $2, ($2==0 ? "(disabled — good)" : "(ENABLED — run tune!)")}'
 
   hdr "Versions"
+  echo "  spark-comfyui: $VERSION"
   if [[ -d "$INSTALL_DIR/.git" ]]; then
     echo "  ComfyUI: $(git -C "$INSTALL_DIR" log -1 --format='%h %cd %s' --date=short) [branch: $(git -C "$INSTALL_DIR" rev-parse --abbrev-ref HEAD)]"
     if [[ -f "$PATCH_LIST" ]] && grep -qE '^[^#[:space:]]' "$PATCH_LIST"; then
@@ -873,6 +889,32 @@ available after '$0 update' has moved ComfyUI forward at least once."
 cmd_doctor() {
   PASS=0; FAIL=0
   activate_venv
+
+  # Version first: doctor output doubles as a bug report, and it should say
+  # which spark-comfyui produced it. The pending-update probe lives here (and
+  # only here) on purpose — it needs a network fetch, which has no business
+  # on the run/stop/status hot paths. warn, not bad: a pending release is
+  # not a health failure and must not flip doctor's exit code.
+  hdr "spark-comfyui (self)"
+  if [[ -d "$BASE_DIR/.git" ]]; then
+    info "git revision $(git -C "$BASE_DIR" rev-parse --short HEAD 2>/dev/null)"
+  else
+    info "not a git clone — self-update unavailable"
+  fi
+  if [[ -d "$BASE_DIR/.git" ]] && timeout 5 git -C "$BASE_DIR" fetch -q origin 2>/dev/null; then
+    local self_local self_up remote_ver
+    self_local="$(git -C "$BASE_DIR" rev-parse HEAD 2>/dev/null)"
+    self_up="$(git -C "$BASE_DIR" rev-parse '@{u}' 2>/dev/null || echo "$self_local")"
+    if [[ "$self_local" == "$self_up" ]]; then
+      info "up to date with the published repo"
+    elif git -C "$BASE_DIR" merge-base --is-ancestor "$self_local" "$self_up" 2>/dev/null; then
+      remote_ver="$(git -C "$BASE_DIR" show '@{u}:spark-comfyui.sh' 2>/dev/null \
+        | sed -n 's/^VERSION="\([^"]*\)".*/\1/p' | head -1)"
+      warn "a newer spark-comfyui is published (v${remote_ver:-?}) — get it: $0 update"
+    else
+      info "local clone has diverged from the published repo (local commits)"
+    fi
+  fi
 
   hdr "PyTorch / GPU (CPU-shadow check)"
   if python - <<'PY'
@@ -1213,6 +1255,11 @@ UNIT
 # ------------------------------- Dispatch -----------------------------------
 CMD="${1:-}"
 shift || true
+# Banner on every invocation; --version excepted (kept one-line parseable).
+case "$CMD" in
+  -v|--version|version) ;;
+  *) banner ;;
+esac
 case "$CMD" in
   install)  cmd_install "$@" ;;
   run)      cmd_run "$@" ;;
