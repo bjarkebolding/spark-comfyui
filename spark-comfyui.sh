@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 1.1.0 | License: MIT
+#  Version 1.2.0 | License: MIT
 # =============================================================================
 #  One script for the whole lifecycle, tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory.
@@ -18,6 +18,9 @@
 #    update [--torch|--rollback]
 #                              Update ComfyUI + deps; rebuild SageAttention
 #                              only if needed; repair anything shadowed.
+#                              Also self-updates spark-comfyui itself first
+#                              (git fast-forward, only when its repo has
+#                              newer commits; SPARK_SELF_UPDATE=0 disables).
 #                              --torch upgrades PyTorch (forces Sage rebuild).
 #                              --rollback returns to the pre-update revision.
 #                              Optional: list PRs/branches to merge on top of
@@ -44,7 +47,7 @@
 # =============================================================================
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -386,6 +389,46 @@ install_self() {
   chmod +x "$SELF" 2>/dev/null || true
 }
 
+# Self-update: pull the spark-comfyui repo itself (script + mods) before
+# updating anything else, so updater fixes and new mods take effect in this
+# very run. Acts ONLY when all of these hold: BASE_DIR is a git clone with
+# an upstream branch, the remote is strictly ahead (fast-forwardable), and
+# the user hasn't diverged (local commits) — otherwise it warns or silently
+# skips and the update continues on the current version. After a successful
+# pull it re-execs the fresh script exactly once (SPARK_SELF_UPDATED guard):
+# bash reads scripts incrementally, so the running copy must never continue
+# executing from a file that just changed underneath it.
+# Opt out entirely with SPARK_SELF_UPDATE=0.
+self_update() {
+  [[ "${SPARK_SELF_UPDATE:-1}" == "1" ]] || return 0
+  [[ -z "${SPARK_SELF_UPDATED:-}" ]] || return 0   # already updated this run
+  [[ -d "$BASE_DIR/.git" ]] || return 0            # not installed via git clone
+  local local_rev upstream_rev
+  if ! git -C "$BASE_DIR" fetch -q origin 2>/dev/null; then
+    warn "self-update: could not reach the spark-comfyui repo (offline?) —
+continuing with the current version"
+    return 0
+  fi
+  local_rev="$(git -C "$BASE_DIR" rev-parse HEAD 2>/dev/null)" || return 0
+  upstream_rev="$(git -C "$BASE_DIR" rev-parse '@{u}' 2>/dev/null)" || return 0
+  [[ "$local_rev" == "$upstream_rev" ]] && return 0  # already current
+  if ! git -C "$BASE_DIR" merge-base --is-ancestor "$local_rev" "$upstream_rev"; then
+    warn "spark-comfyui's own repo has local commits that diverge from upstream —
+not self-updating. Reconcile manually: git -C $BASE_DIR pull"
+    return 0
+  fi
+  log "Updating spark-comfyui itself: ${local_rev:0:8} -> ${upstream_rev:0:8}"
+  if git -C "$BASE_DIR" merge -q --ff-only "$upstream_rev" 2>/dev/null; then
+    echo "Re-running update with the new version..."
+    SPARK_SELF_UPDATED=1 exec "$SELF" update "$@"
+  else
+    warn "self-update could not fast-forward (uncommitted local edits in
+$BASE_DIR?) — continuing with the current version. To update manually:
+  git -C $BASE_DIR pull"
+  fi
+  return 0
+}
+
 # =============================================================================
 #  install
 # =============================================================================
@@ -594,6 +637,7 @@ Run '$0 doctor' to diagnose, or '$0 update' to rebuild."
 #  update
 # =============================================================================
 cmd_update() {
+  self_update "$@"
   local upgrade_torch=0
   for arg in "$@"; do
     case "$arg" in
@@ -972,6 +1016,23 @@ build — high shadow risk. Re-run: $0 update" \
   else
     bad "onnxruntime is CPU-ONLY — a PyPI wheel likely shadowed the sm_121 GPU
         wheel (shared import path, no pip conflict). Fix: $0 update"
+  fi
+
+  hdr "comfy-kitchen (NVFP4/FP8 quantization backends)"
+  # ComfyUI picks comfy-kitchen's fastest capable backend per call and
+  # quietly serves quantized models from the pure-PyTorch 'eager' path when
+  # the native CUDA backend is broken/unavailable — everything still works,
+  # just massively slower. A registry listing is a claim; run the kernels.
+  if ! python -c "import comfy_kitchen" 2>/dev/null; then
+    info "comfy-kitchen not installed (ships with current ComfyUI; only used by quantized models)"
+  elif kitchen_nvfp4_ok; then
+    ok "NVFP4 kernels live on the native CUDA backend (forced + numerically verified)"
+  else
+    bad "comfy-kitchen's CUDA backend FAILED a live NVFP4 kernel test —
+        quantized (NVFP4/FP8) models will silently run on the slow eager
+        path. Requires torch cu13 and an SM>=10.0 GPU. Fix: $0 update
+        (repairs torch); if it persists, check ComfyUI's startup log for
+        'Found comfy_kitchen backend cuda' and its unavailable_reason"
   fi
 
   hdr "NVRTC (GPU-FFT custom-node check)"

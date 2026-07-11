@@ -165,6 +165,37 @@ assert o.shape == q.shape and torch.isfinite(o).all()
 PY
 }
 
+# comfy-kitchen NVFP4 live gate. ComfyUI auto-selects comfy-kitchen's
+# fastest backend per call and quietly uses the pure-PyTorch 'eager' path
+# when the native CUDA backend can't serve it — quantized (NVFP4/FP8)
+# models keep working, just massively slower, with nothing surfaced.
+# use_backend() genuinely enforces (raises BackendNotFoundError instead of
+# falling back — verified live on GB10, 2026-07), so success under forcing
+# proves the CUDA backend's kernels actually ran. The cosine check against
+# a bf16 reference guards against garbage output, not just crashes (NVFP4
+# is coarse; healthy runs measure ~0.99).
+kitchen_nvfp4_ok() {
+  python - <<'PY' >/dev/null 2>&1
+import torch
+import comfy_kitchen as ck
+M, N, K = 128, 256, 512
+a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+b = torch.randn(N, K, dtype=torch.bfloat16, device="cuda")
+FP4_MAX, FP8_MAX = 6.0, 448.0
+sa = (a.abs().amax().float() / (FP4_MAX * FP8_MAX)).clamp(min=1e-8)
+sb = (b.abs().amax().float() / (FP4_MAX * FP8_MAX)).clamp(min=1e-8)
+with ck.use_backend("cuda"):
+    qa, bsa = ck.quantize_nvfp4(a, sa)
+    qb, bsb = ck.quantize_nvfp4(b, sb)
+    y = ck.scaled_mm_nvfp4(qa, qb, sa, sb, bsa, bsb, out_dtype=torch.bfloat16)
+torch.cuda.synchronize()
+assert torch.isfinite(y).all()
+ref = a.float() @ b.float().T
+cos = torch.nn.functional.cosine_similarity(y.float().flatten(), ref.flatten(), dim=0)
+assert cos > 0.98, f"cosine {cos.item():.4f}"
+PY
+}
+
 # Count per-call SageAttention runtime fallbacks in a ComfyUI log. ComfyUI
 # catches SageAttention exceptions per call and silently uses PyTorch
 # attention instead (comfy/ldm/modules/attention.py), so the build-time

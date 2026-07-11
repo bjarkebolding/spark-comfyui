@@ -18,10 +18,11 @@ self-healing.
 
 Author/owner: GitHub `bjarkebolding`. Target repo name: `spark-comfyui`.
 Hardware in use: DGX Spark, hostname `sparky`, install root `~/comfyui-spark/`.
-Current version: **1.1.0** (MIT licensed, shellcheck-clean).
+Current version: **1.2.0** (MIT licensed, shellcheck-clean).
 Published: https://github.com/bjarkebolding/spark-comfyui (v1.0.0 2026-07-10,
 v1.1.0 same day — backup-revert bug fix, runtime-fallback + stuck-clock
-doctor checks, TRITON_PTXAS_PATH, mod-state allowlist).
+doctor checks, TRITON_PTXAS_PATH, mod-state allowlist; v1.2.0 2026-07-11 —
+NVFP4 live doctor gate, self-updating `update`).
 
 ## Golden rules (do not regress these)
 
@@ -94,7 +95,10 @@ The script installs ComfyUI, the venv, and SageAttention *next to itself*
 Mental model, also printed in `--help`: *install once → run → update now and
 then; something feels wrong → doctor.* `run` also runs a cheap pre-launch mod
 pass (`apply_prerun_mods` — currently just `20-torch-repair`'s guard against a
-custom node having swapped in CPU torch since the last launch).
+custom node having swapped in CPU torch since the last launch). `update`
+self-updates the tool itself first (`self_update`: ff-only git pull of
+BASE_DIR when upstream is strictly ahead, then re-execs the fresh script
+exactly once — bash must never keep executing a file that changed under it).
 
 ## The mod system (most important architecture)
 
@@ -232,8 +236,9 @@ edits needed. A venv-package mod needs its underlying logic added to
 `ORT_WHEEL_URL`, `PATCH_LIST`, `MODS_DIR`, `SPARK_BF16` (1),
 `SPARK_STATIC_VRAM` (0) — caveat: with SageAttention this can hang a second
 sampling pass on GB10, open ComfyUI issue #13920, `SPARK_SOURCE_PATCHES` (1)
-— disables *all six mods*, not just source patches, `PIP_RETRIES`,
-`PIP_DEFAULT_TIMEOUT`.
+— disables *all six mods*, not just source patches, `SPARK_SELF_UPDATE` (1)
+— set 0 to stop `update` from git-pulling the spark-comfyui repo itself,
+`PIP_RETRIES`, `PIP_DEFAULT_TIMEOUT`.
 
 ## Patch list (separate from mods)
 
@@ -280,7 +285,8 @@ transform on a fixture and `ast.parse` the result first.
   already guarantee, so NVFP4 rides for free on the existing torch guarantee;
   confirmed live via `comfy_kitchen.list_backends()`: `cuda` backend
   `available: True` with `quantize_nvfp4`/`scaled_mm_nvfp4` etc. in its
-  capabilities. One lever we deliberately don't touch: `--enable-triton-backend`
+  capabilities — and since 2026-07-11 enforced by a real forced-kernel gate
+  in `doctor` (`kitchen_nvfp4_ok`), not just the registry listing. One lever we deliberately don't touch: `--enable-triton-backend`
   (off by default in `comfy/quant_ops.py`, not passed by `cmd_run`) would
   additionally enable Kitchen's Triton backend as a third NVFP4 path —
   unevaluated on GB10, don't adopt without a field test.
@@ -300,11 +306,14 @@ transform on a fixture and `ast.parse` the result first.
   - `comfy-aimdo` (new ComfyUI pip dep, multi-threaded model loader built
     with DGX Spark in mind, PR #13802): touches the memory-loading path —
     on next install/update, confirm mod 10's anchor still applies.
-  - `comfy-kitchen[cublas]` extra ("for NVFP4 (+Blackwell)"): plain wheel's
-    `120f` family cubins should cover sm_121 per NVIDIA compat docs, but
-    that's a docs claim, not a live test (golden rule 3) — verify on next
-    install. Also: the forum's "comfy-kitchen 0.2.61" claim is NOT a real
-    version; latest is 0.2.18, already pinned by ComfyUI's requirements.txt.
+  - `comfy-kitchen[cublas]` extra — RESOLVED 2026-07-11 by live test: the
+    plain wheel's CUDA backend passes a forced NVFP4 quantize+matmul on GB10
+    (cosine ~0.99 vs bf16 reference), so the extra is NOT needed on a stock
+    install. `doctor` now gates this permanently (`kitchen_nvfp4_ok` in
+    mod_common.sh — forces the cuda backend via ck.use_backend, which
+    verifiably raises instead of falling back). Also: the forum's
+    "comfy-kitchen 0.2.61" claim is NOT a real version; latest is 0.2.18,
+    already pinned by ComfyUI's requirements.txt.
   - ComfyUI issue #13920 (open): GB10 hang on second sampling pass with
     `--disable-dynamic-vram` + SageAttention (bisected upstream to commit
     1ac78180). Documented as a SPARK_STATIC_VRAM caveat in the env-var
