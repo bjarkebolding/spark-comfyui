@@ -43,7 +43,7 @@ $ ./spark-comfyui.sh update
  (__  ) /_/ / /_/ / /  / ,< /_____/ /__/ /_/ / / / / / / __/ /_/ / /_/ / /
 /____/ .___/\__,_/_/  /_/|_|      \___/\____/_/ /_/ /_/_/  \__, /\__,_/_/
     /_/                                                   /____/
-  v1.4.0 — ComfyUI on the NVIDIA DGX Spark (GB10 Grace Blackwell)
+  v2026.07.13.1 — ComfyUI on the NVIDIA DGX Spark (GB10 Grace Blackwell)
 
 ==> Checking ComfyUI for updates
 ComfyUI master updated: 3f8a12c4 -> b96e02d1
@@ -142,7 +142,7 @@ $ ./spark-comfyui.sh doctor
 
 ```console
 $ ./spark-comfyui.sh status --watch 2
-spark-comfyui v1.4.0 — live telemetry, every 2s (window 80s) — Ctrl-C stops
+spark-comfyui v2026.07.13.1 — live telemetry, every 2s (window 80s) — Ctrl-C stops
 log: /home/user/spark-comfyui/thermal_monitor.log
 
   temp          44°C                      ▁▁▁▁▃▃▅▇▇▆██▃▃▃▃▃▃▃▃  39–59

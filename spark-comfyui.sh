@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 1.4.0 | License: MIT
+#  Version 2026.07.13.1 | License: MIT
 # =============================================================================
 #  One script for the whole lifecycle, tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory.
@@ -50,7 +50,10 @@
 # =============================================================================
 set -euo pipefail
 
-VERSION="1.4.0"
+# Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
+# behavior-changing release on the same day. Bumped in the same push as any
+# behavior change (pushing to main IS releasing); docs-only pushes don't bump.
+VERSION="2026.07.13.1"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so

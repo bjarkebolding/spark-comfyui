@@ -18,7 +18,13 @@ self-healing.
 
 Author/owner: GitHub `bjarkebolding`. Target repo name: `spark-comfyui`.
 Hardware in use: DGX Spark, hostname `sparky`, install root `~/comfyui-spark/`.
-Current version: **1.4.0** (MIT licensed, shellcheck-clean).
+Current version: **2026.07.13.1** (MIT licensed, shellcheck-clean).
+Versioning is **CalVer** as of 2026-07-13: `YYYY.MM.DD`, plus `.N` for a
+second behavior-changing release the same day. Semver was dropped because
+push cadence made it meaningless (pushing to main IS releasing); a version's
+only job here is to stamp which behavior state a bug report ran. The
+`1.4.0 → 2026.x` transition sorts correctly under `sort -V`, and `doctor`'s
+update probe is git-ancestry-based, so the format is cosmetic to tooling.
 Published: https://github.com/bjarkebolding/spark-comfyui (v1.0.0 2026-07-10,
 v1.1.0 same day — backup-revert bug fix, runtime-fallback + stuck-clock
 doctor checks, TRITON_PTXAS_PATH, mod-state allowlist; v1.2.0 2026-07-11 —
@@ -28,9 +34,10 @@ status version line; v1.4.0 2026-07-13 — `status --watch` live sparkline
 dashboard: temp/power/SM-clock/util/unified-RAM/CPU timeseries with min–max
 ranges, optional interval arg, dated log lines, python-not-wrapper pid/RSS
 detection, plain-line fallback when stdout isn't a tty — the durable
-thermal_monitor.log evidence trail is unchanged in purpose). NOTE:
-self-update pulls main HEAD, so pushing to main IS releasing — always bump
-VERSION in the same push.
+thermal_monitor.log evidence trail is unchanged in purpose; 2026.07.13.1
+same day — switch to CalVer, no functional change). NOTE: self-update pulls
+main HEAD, so pushing to main IS releasing — always bump VERSION in the
+same push.
 
 ## Golden rules (do not regress these)
 
@@ -350,9 +357,13 @@ transform on a fixture and `ast.parse` the result first.
 
 1. `chmod +x spark-comfyui.sh` stays committed (mode bit `100755` in the index).
 2. `git add spark-comfyui.sh mods/ README.md LICENSE .gitignore CLAUDE.md`
-3. Bump `VERSION=` in spark-comfyui.sh (+ its header comment + the "Current
-   version" line above), tag `v<VERSION>` to match `--version`.
+3. Set `VERSION=` in spark-comfyui.sh to today's date, `YYYY.MM.DD`
+   zero-padded (append `.N` if a behavior-changing release already went out
+   today). Also update the header comment and the "Current version" line
+   above. Tag `v<VERSION>` to match `--version`.
 4. README clone URL already set to `github.com/bjarkebolding/spark-comfyui`.
+   The version strings inside README console captures are illustrative —
+   refresh them when a capture is retaken, not on every release.
 5. `gh release create v<VERSION> --title v<VERSION> --notes "..."` — every
    version has a GitHub Release, not just a tag (v1.4.0 nearly shipped
    without one). Notes style: one-line theme, then `##` sections with the
