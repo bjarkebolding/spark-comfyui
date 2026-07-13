@@ -353,3 +353,8 @@ transform on a fixture and `ast.parse` the result first.
 3. Bump `VERSION=` in spark-comfyui.sh (+ its header comment + the "Current
    version" line above), tag `v<VERSION>` to match `--version`.
 4. README clone URL already set to `github.com/bjarkebolding/spark-comfyui`.
+5. `gh release create v<VERSION> --title v<VERSION> --notes "..."` — every
+   version has a GitHub Release, not just a tag (v1.4.0 nearly shipped
+   without one). Notes style: one-line theme, then `##` sections with the
+   user-visible changes; end with the upgrade line. Console captures where
+   they help.
