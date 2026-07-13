@@ -25,7 +25,7 @@ Everything installs under the directory the script lives in — fully relocatabl
 | `stop` | Stops ComfyUI (systemd service or foreground process). |
 | `update [--torch] [--rollback]` | Self-updates spark-comfyui itself first (git fast-forward, only when this repo has newer commits), then updates ComfyUI + dependencies; rebuilds SageAttention only when needed; repairs anything shadowed; ends with a clear summary. `--torch` upgrades PyTorch (forces a Sage rebuild). `--rollback` returns to the pre-update revision. |
 | `doctor` | Full health check. Verifies every optimization is present **and active**, and diagnoses the GB10 silent-drift traps: shadowed torch/SageAttention/onnxruntime, silent attention fallbacks, dead quantization (NVFP4) backend, stale toolchain, swap, stuck clocks. Every failure names its fix. |
-| `status [--watch]` | One-page glance: process, GPU temp/power/memory, versions, branch, config. `--watch` logs a 5-second telemetry trail — post-mortem evidence for silent hard-reboots. |
+| `status [--watch [SEC]]` | One-page glance: process, GPU temp/power/memory, versions, branch, config. `--watch` opens a live sparkline dashboard (temp, power, SM clock, GPU util, unified RAM, CPU — every 5s or `SEC`) while appending every sample to `thermal_monitor.log` — post-mortem evidence for silent hard-reboots. |
 | `tune [--clock-cap MHZ] [--persist]` | System stability: disables swap, sets GPU persistence mode, optional clock cap. `--persist` makes it survive reboots via systemd. |
 | `service` | Installs and starts a systemd user service (auto-start, restart-on-failure, survives logout). |
 
@@ -43,7 +43,7 @@ $ ./spark-comfyui.sh update
  (__  ) /_/ / /_/ / /  / ,< /_____/ /__/ /_/ / / / / / / __/ /_/ / /_/ / /
 /____/ .___/\__,_/_/  /_/|_|      \___/\____/_/ /_/ /_/_/  \__, /\__,_/_/
     /_/                                                   /____/
-  v1.3.0 — ComfyUI on the NVIDIA DGX Spark (GB10 Grace Blackwell)
+  v1.4.0 — ComfyUI on the NVIDIA DGX Spark (GB10 Grace Blackwell)
 
 ==> Checking ComfyUI for updates
 ComfyUI master updated: 3f8a12c4 -> b96e02d1
@@ -136,6 +136,27 @@ $ ./spark-comfyui.sh doctor
 == Summary ==
   20 passed, 0 failed
   No silent-drift issues detected.
+```
+
+`status --watch` during a generation — the power ramp at denoise start (the overcurrent-reboot trigger on some units) is exactly what the sparklines make visible, and every sample also lands in `thermal_monitor.log` so the trail survives a hard reboot:
+
+```console
+$ ./spark-comfyui.sh status --watch 2
+spark-comfyui v1.4.0 — live telemetry, every 2s (window 80s) — Ctrl-C stops
+log: /home/user/spark-comfyui/thermal_monitor.log
+
+  temp          44°C                      ▁▁▁▁▃▃▅▇▇▆██▃▃▃▃▃▃▃▃  39–59
+  power       10.72W                      ▁▁▁▂▃▄▅█████▁▁▁▁▁▁▁▁  10.27–73.88
+  sm clk     2411MHz                      ▁▁▁▃▇▇█▇▇▇▆▆▂▂▂▂▂▂▂▂  2398–2463
+  gpu             0%                      ▁▁▁▁▆▆██████▁▁▁▁▁▁▁▁  0–96
+  unified      23.7G                      ▁▁▂▃▅▇██████████████  4.9–24.3  of 122G
+  cpu             0%                       ▂█▆▆██▆▆▆▆▆▃▁▂▁▂▂▂▁  0–9
+
+  swap: disabled (good)
+  ComfyUI: RUNNING pid 12345 rss 2.5G [SageAttention]
+
+  a power spike as the LAST sample before a silent reboot = overcurrent
+  -> fix: ./spark-comfyui.sh tune --clock-cap 2100
 ```
 
 ## Patch list (optional)

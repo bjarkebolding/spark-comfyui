@@ -18,14 +18,19 @@ self-healing.
 
 Author/owner: GitHub `bjarkebolding`. Target repo name: `spark-comfyui`.
 Hardware in use: DGX Spark, hostname `sparky`, install root `~/comfyui-spark/`.
-Current version: **1.3.0** (MIT licensed, shellcheck-clean).
+Current version: **1.4.0** (MIT licensed, shellcheck-clean).
 Published: https://github.com/bjarkebolding/spark-comfyui (v1.0.0 2026-07-10,
 v1.1.0 same day — backup-revert bug fix, runtime-fallback + stuck-clock
 doctor checks, TRITON_PTXAS_PATH, mod-state allowlist; v1.2.0 2026-07-11 —
 NVFP4 live doctor gate, self-updating `update`; v1.3.0 same day — version
 banner on every invocation, doctor self-version + update-pending probe,
-status version line). NOTE: self-update pulls main HEAD, so pushing to main
-IS releasing — always bump VERSION in the same push.
+status version line; v1.4.0 2026-07-13 — `status --watch` live sparkline
+dashboard: temp/power/SM-clock/util/unified-RAM/CPU timeseries with min–max
+ranges, optional interval arg, dated log lines, python-not-wrapper pid/RSS
+detection, plain-line fallback when stdout isn't a tty — the durable
+thermal_monitor.log evidence trail is unchanged in purpose). NOTE:
+self-update pulls main HEAD, so pushing to main IS releasing — always bump
+VERSION in the same push.
 
 ## Golden rules (do not regress these)
 
@@ -91,7 +96,7 @@ The script installs ComfyUI, the venv, and SageAttention *next to itself*
 ## Commands (dispatch at the bottom of the script)
 
 `install` · `run [args]` · `stop` · `update [--torch|--rollback]` · `doctor` ·
-`status [--watch]` · `tune [--clock-cap MHZ] [--persist]` · `service` ·
+`status [--watch [SEC]]` · `tune [--clock-cap MHZ] [--persist]` · `service` ·
 `--version`. Hidden back-compat aliases: `verify`→doctor, `monitor`→status
 --watch, `rollback`→update --rollback, `bench`→removed (prints A/B guidance).
 
@@ -207,6 +212,22 @@ edits needed. A venv-package mod needs its underlying logic added to
 - **Unified memory**: swap ON + heavy load = silent whole-box freeze (no OOM
   kill). `tune` disables swap. `--gpu-only`/`--highvram` HURT here. bf16 flags
   are the native fast path (`SPARK_BF16=0` to disable).
+- **`--high-ram` (upstream PR #14437, merged 2026-06) — A/B-tested 2026-07-13,
+  REJECTED**: full 2×2 matrix (pinning × high-ram), Krea-2 Turbo template,
+  1024², 8 steps, fresh launch per condition. All three of the flag's code
+  paths gate on pinned memory (`ensure_pin_budget`, `pinned_hostbuf_size`,
+  `handle_pin` in `comfy/ops.py`) and `pin_memory()` no-ops under our
+  `--disable-pinned-memory`, so on the production config it reduces to
+  forcing `--cache-classic` — measured: no change (≤3%, within noise). In
+  its real mode (pinning enabled) it was strictly worse on GB10: first-gen
+  19.4s vs 18.4s, LoRA-repatch 18.9s vs 15.0s (+26%), steady 13.5s vs 12.8s,
+  and ~17 GB extra RAM pinned (uncapped `pinned_hostbuf_size` = 2× model
+  size — would also starve co-resident vLLM). Its designed benefit (forcing
+  residency vs pagefile) is moot here: `tune` already disables swap. Same
+  bench also re-validated `--disable-pinned-memory` against the reworked
+  2026-06 pinning code: pinning-enabled-without-high-ram was identical to
+  baseline within noise (12.69s vs 12.76s steady), so the flag stays — no
+  cost, and it inoculates against the uncapped-pin path.
 - **get_free_memory cliff** (mod 10): `cudaMemGetInfo` under-reports free mem
   when another CUDA process (vLLM) is resident → needless offload → 5-15×
   slower sampling. Fixed by reading `psutil.virtual_memory().available`.

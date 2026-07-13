@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 1.3.0 | License: MIT
+#  Version 1.4.0 | License: MIT
 # =============================================================================
 #  One script for the whole lifecycle, tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory.
@@ -31,9 +31,12 @@
 #                              is present AND active, and diagnoses the GB10
 #                              silent-drift traps (shadowed torch/Sage/ONNX,
 #                              stale ptxas/NVRTC, swap). Names each fix.
-#    status [--watch]          One-page glance: process, GPU, memory, versions.
-#                              --watch logs temp/power/RAM every 5s (evidence
-#                              trail for diagnosing silent hard-reboots).
+#    status [--watch [SEC]]    One-page glance: process, GPU, memory, versions.
+#                              --watch shows a live dashboard (sparkline
+#                              timeseries: temp/power/clock/util/RAM/CPU,
+#                              every 5s or SEC) and appends every sample to
+#                              thermal_monitor.log — the evidence trail for
+#                              diagnosing silent hard-reboots survives them.
 #    tune [--clock-cap MHZ] [--persist]
 #                              System stability: disable swap (prevents
 #                              unified-memory freezes), persistence mode,
@@ -47,7 +50,7 @@
 # =============================================================================
 set -euo pipefail
 
-VERSION="1.3.0"
+VERSION="1.4.0"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -793,19 +796,127 @@ own (vm.swappiness above already does) — add --persist to make all of it perma
 # =============================================================================
 #  status — one-page health overview
 # =============================================================================
+# One row of the --watch dashboard: label, current reading, a sparkline of
+# the sample window, and the window's min–max range. The series is a
+# space-joined list of numbers in which "-" marks a missed sample. The bar
+# glyphs are split into an array (not indexed with substr) so this renders
+# identically under gawk (char-based substr) and mawk (byte-based).
+_watch_row() {
+  awk -v label="$1" -v cur="$2" -v s="$3" 'BEGIN {
+    split("▁ ▂ ▃ ▄ ▅ ▆ ▇ █", bar, " ")
+    n = split(s, v, " "); lo = 1e30; hi = -1e30
+    for (i = 1; i <= n; i++) if (v[i] != "-") {
+      if (v[i] + 0 < lo) lo = v[i] + 0
+      if (v[i] + 0 > hi) hi = v[i] + 0
+    }
+    out = ""
+    for (i = 1; i <= n; i++) {
+      if (v[i] == "-") { out = out " "; continue }
+      lvl = (hi > lo) ? int((v[i] - lo) / (hi - lo) * 7 + 0.5) : 4
+      out = out bar[lvl + 1]
+    }
+    range = (lo <= hi) ? sprintf("%.4g–%.4g", lo, hi) : ""
+    printf "  %-8s %9s  %s  %s", label, cur, out, range
+  }'
+}
+
+# "62" + "°C" -> "62°C", but a missed sample ("-") -> "n/a".
+_watch_val() { if [[ "$1" == "-" ]]; then echo "n/a"; else echo "$1$2"; fi; }
+
 cmd_status() {
-  # --watch: log GPU temp/power/RAM every 5s (post-mortem evidence for
-  # silent hard-reboots: a power spike right before death = overcurrent
-  # -> fix with: tune --clock-cap 2100)
+  # --watch: live dashboard (sparkline timeseries per metric) + an append-only
+  # log line per sample. The LOG is the actual point: it survives the silent
+  # hard-reboots this exists to diagnose (a power spike as the final sample
+  # = overcurrent -> fix with: tune --clock-cap 2100). The dashboard is just
+  # the live view of the same samples; when stdout isn't a terminal (redirect,
+  # journal), it drops away and plain log lines are emitted instead.
   if [[ "${1:-}" == "--watch" || "${1:-}" == "-w" ]]; then
-    local logfile="$BASE_DIR/thermal_monitor.log"
-    log "Logging every 5s to $logfile (Ctrl-C to stop)"
+    local interval=5 logfile="$BASE_DIR/thermal_monitor.log"
+    [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] && interval="$2"
+    local win=40 i tick=0
+    local -a h_temp h_pwr h_clk h_util h_ram h_cpu
+    # Pre-fill the ring buffers so the sparkline width is constant from tick 1.
+    for ((i = 0; i < win; i++)); do
+      h_temp[i]='-' h_pwr[i]='-' h_clk[i]='-' h_util[i]='-' h_ram[i]='-' h_cpu[i]='-'
+    done
+    local gpu_csv t p c u mem_used mem_tot swap_used swap_tot cpu_pct
+    local prev_idle=0 prev_tot=0 pid cand rss comfy swap_disp
+    local tty=0
+    if [[ -t 1 ]]; then tty=1; printf '\033[2J\033[?25l'; trap 'printf "\033[?25h\n"' EXIT
+    else log "Logging every ${interval}s to $logfile (Ctrl-C to stop)"; fi
     while true; do
-      echo "$(date +%H:%M:%S) GPU=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits)°C \
-PWR=$(nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits)W \
-RAM=$(free -g | awk '/Mem:/{print $3"/"$2}')G \
-SWAP=$(free -g | awk '/Swap:/{print $3}')G" | tee -a "$logfile"
-      sleep 5
+      # ---- sample everything once per tick --------------------------------
+      gpu_csv="$(nvidia-smi --query-gpu=temperature.gpu,power.draw,clocks.sm,utilization.gpu \
+                   --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')"
+      IFS=',' read -r t p c u <<<"$gpu_csv"
+      [[ "${t:-}" =~ ^[0-9.]+$ ]] || t='-'
+      [[ "${p:-}" =~ ^[0-9.]+$ ]] || p='-'
+      [[ "${c:-}" =~ ^[0-9.]+$ ]] || c='-'
+      [[ "${u:-}" =~ ^[0-9.]+$ ]] || u='-'
+      read -r mem_used mem_tot swap_used swap_tot <<<"$(awk '
+        /^MemTotal:/ {mt=$2} /^MemAvailable:/ {ma=$2}
+        /^SwapTotal:/ {st=$2} /^SwapFree:/ {sf=$2}
+        END {printf "%.1f %.0f %.1f %.0f", (mt-ma)/1048576, mt/1048576, (st-sf)/1048576, st/1048576}
+        ' /proc/meminfo)"
+      # Whole-box CPU% from the /proc/stat delta (first tick has no delta yet)
+      read -r cpu_pct prev_idle prev_tot <<<"$(awk -v pi="$prev_idle" -v pt="$prev_tot" '
+        /^cpu / {idle = $5 + $6; tot = 0
+                 for (f = 2; f <= NF; f++) tot += $f
+                 pct = (pt > 0 && tot > pt) ? 100 * (1 - (idle - pi) / (tot - pt)) : -1
+                 printf "%.0f %d %d", pct, idle, tot; exit}' /proc/stat)"
+      [[ "$cpu_pct" == "-1" ]] && cpu_pct='-'
+      h_temp=("${h_temp[@]:1}" "$t");        h_pwr=("${h_pwr[@]:1}" "$p")
+      h_clk=("${h_clk[@]:1}" "$c");          h_util=("${h_util[@]:1}" "$u")
+      h_ram=("${h_ram[@]:1}" "$mem_used");   h_cpu=("${h_cpu[@]:1}" "$cpu_pct")
+
+      # Prefer the actual python server over wrapper shells whose command
+      # line merely contains the launch string (bash -c, script(1), sudo…).
+      comfy="not running" pid=""
+      for cand in $(pgrep -f 'main.py --listen' 2>/dev/null); do
+        pid="${pid:-$cand}"   # fallback: first match
+        if [[ "$(cat "/proc/$cand/comm" 2>/dev/null)" == python* ]]; then
+          pid="$cand"; break
+        fi
+      done
+      if [[ -n "$pid" ]]; then
+        rss="$(awk '/^VmRSS:/ {printf "%.1f", $2/1048576}' "/proc/$pid/status" 2>/dev/null || true)"
+        comfy="RUNNING pid $pid rss ${rss:-?}G"
+        pgrep -af 'main.py --listen' 2>/dev/null | grep -q 'use-sage-attention' \
+          && comfy+=" [SageAttention]"
+      fi
+      if [[ "$swap_tot" == "0" ]]; then swap_disp="disabled (good)"
+      else swap_disp="${swap_used}/${swap_tot}G (ENABLED — run tune!)"; fi
+
+      # ---- durable evidence line (always) ----------------------------------
+      printf '%(%F %T)T GPU=%s°C PWR=%sW SM=%sMHz UTIL=%s%% RAM=%s/%sG SWAP=%sG CPU=%s%%\n' \
+        -1 "$t" "$p" "$c" "$u" "$mem_used" "$mem_tot" "$swap_used" "$cpu_pct" >>"$logfile"
+
+      # ---- live view --------------------------------------------------------
+      if (( tty )); then
+        (( tick++ )) || true
+        printf '\033[H'
+        printf '%s\033[K\n' \
+          "spark-comfyui v$VERSION — live telemetry, every ${interval}s (window $((win * interval))s) — Ctrl-C stops" \
+          "log: $logfile" \
+          "" \
+          "$(_watch_row "temp"    "$(_watch_val "$t" "°C")"       "${h_temp[*]}")" \
+          "$(_watch_row "power"   "$(_watch_val "$p" "W")"        "${h_pwr[*]}")" \
+          "$(_watch_row "sm clk"  "$(_watch_val "$c" "MHz")"      "${h_clk[*]}")" \
+          "$(_watch_row "gpu"     "$(_watch_val "$u" "%")"        "${h_util[*]}")" \
+          "$(_watch_row "unified" "${mem_used}G"                  "${h_ram[*]}")  of ${mem_tot}G" \
+          "$(_watch_row "cpu"     "$(_watch_val "$cpu_pct" "%")"  "${h_cpu[*]}")" \
+          "" \
+          "  swap: $swap_disp" \
+          "  ComfyUI: $comfy" \
+          "" \
+          "  a power spike as the LAST sample before a silent reboot = overcurrent" \
+          "  -> fix: $0 tune --clock-cap 2100" \
+          "  samples: $tick"
+        printf '\033[J'
+      else
+        tail -1 "$logfile"
+      fi
+      sleep "$interval"
     done
   fi
 
