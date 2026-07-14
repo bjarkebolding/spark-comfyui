@@ -18,7 +18,7 @@ self-healing.
 
 Author/owner: GitHub `bjarkebolding`. Target repo name: `spark-comfyui`.
 Hardware in use: DGX Spark, hostname `sparky`, install root `~/comfyui-spark/`.
-Current version: **2026.07.13.1** (MIT licensed, shellcheck-clean).
+Current version: **2026.07.14** (MIT licensed, shellcheck-clean).
 Versioning is **CalVer** as of 2026-07-13: `YYYY.MM.DD`, plus `.N` for a
 second behavior-changing release the same day. Semver was dropped because
 push cadence made it meaningless (pushing to main IS releasing); a version's
@@ -35,7 +35,35 @@ dashboard: temp/power/SM-clock/util/unified-RAM/CPU timeseries with min–max
 ranges, optional interval arg, dated log lines, python-not-wrapper pid/RSS
 detection, plain-line fallback when stdout isn't a tty — the durable
 thermal_monitor.log evidence trail is unchanged in purpose; 2026.07.13.1
-same day — switch to CalVer, no functional change). NOTE: self-update pulls
+same day — switch to CalVer, no functional change; 2026.07.14 — status
+--watch v2: sectioned dashboard (GPU / unified memory / system / processes),
+per-glyph heat-colored sparklines (green/yellow/red by absolute thresholds:
+temp 70/80, power 60/80 — red power IS the overcurrent zone), trend arrows,
+min–max~avg stats, terminal-width-adaptive window; new telemetry: P-state +
+decoded clock-event flags (sw-power-cap is benign/constant on GB10, the four
+HW/thermal-slowdown bits render red), page cache, load avg, disk I/O rate
+from /proc/diskstats, per-process GPU memory via query-compute-apps —
+co-resident vLLM becomes its own sparkline — and generation telemetry from
+ComfyUI's own stock API via _watch_comfy (one python call per tick hits
+/history, /queue, /internal/logs/raw): gen duration + in-flight elapsed (an
+errored gen is labeled; a gen in flight at crash time is the overcurrent
+smoking gun), live it/s (newest tqdm rate in the server's terminal ring
+buffer, only while in flight — per-step progress_state ws events are NOT
+passively observable, they only go to the owning client), true
+submission→saved latency (the watch timestamps queue ids on first sight;
+latency must be computed BEFORE the seen[] prune, see code comment), queue
+depth, and node-cache hit rate (execution_cached nodes vs the prompt's
+node count); EVERY dashboard line is a timeseries row (pstate,
+throttle-bit count, swap, ComfyUI rss, ComfyUI gpu mem, co-resident gpu
+mem, gen, it/s, latency, queue, hit rate — process identity lives in the
+PROCESSES section header, one-off facts ride in each row's trailing extra
+slot); log line gained CACHE/LOAD/IO/RSS/CGPU/OGPU/PST/EVT/GEN/ACT/ITS/
+LAT/Q/HIT fields; field-verified end-to-end with live Krea-2 gens (hit
+rate 67% = 6/9 nodes cached on repeat submission); the static
+overcurrent hint lines were dropped from the dashboard (the README
+troubleshooting section carries that knowledge now); utilization.memory was
+probed and DROPPED — the counter reads constant 0 on GB10 even at 90 W, a
+dead gauge in a forensic log misleads). NOTE: self-update pulls
 main HEAD, so pushing to main IS releasing — always bump VERSION in the
 same push.
 

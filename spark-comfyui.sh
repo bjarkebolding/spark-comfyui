@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.07.13.1 | License: MIT
+#  Version 2026.07.14 | License: MIT
 # =============================================================================
 #  One script for the whole lifecycle, tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory.
@@ -53,7 +53,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.07.13.1"
+VERSION="2026.07.14"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -799,32 +799,153 @@ own (vm.swappiness above already does) — add --persist to make all of it perma
 # =============================================================================
 #  status — one-page health overview
 # =============================================================================
-# One row of the --watch dashboard: label, current reading, a sparkline of
-# the sample window, and the window's min–max range. The series is a
-# space-joined list of numbers in which "-" marks a missed sample. The bar
-# glyphs are split into an array (not indexed with substr) so this renders
-# identically under gawk (char-based substr) and mawk (byte-based).
+# One row of the --watch dashboard: label, current value+unit with a trend
+# arrow, a sparkline of the sample window, and the window's min–max and mean.
+# The series is a space-joined list of numbers in which "-" marks a missed
+# sample. When warn/crit thresholds are given (absolute values, "" = off),
+# every glyph — and the current reading — is heat-colored green/yellow/red by
+# its own value; unthresholded rows render in a single accent color. Colors
+# wrap the *padded* value text so escape bytes never skew the column widths.
+# The bar glyphs are split into an array (not indexed with substr) so this
+# renders identically under gawk (char-based substr) and mawk (byte-based).
 _watch_row() {
-  awk -v label="$1" -v cur="$2" -v s="$3" 'BEGIN {
+  awk -v label="$1" -v cur="$2" -v unit="$3" -v s="$4" \
+      -v warn="${5:-}" -v crit="${6:-}" -v extra="${7:-}" '
+  function heat(x) {
+    if (warn == "") return "\033[36m"
+    if (crit != "" && x + 0 >= crit + 0) return "\033[31m"
+    if (x + 0 >= warn + 0) return "\033[33m"
+    return "\033[32m"
+  }
+  BEGIN {
     split("▁ ▂ ▃ ▄ ▅ ▆ ▇ █", bar, " ")
-    n = split(s, v, " "); lo = 1e30; hi = -1e30
+    d = "\033[2m"; b = "\033[1m"; r = "\033[0m"
+    n = split(s, v, " "); lo = 1e30; hi = -1e30; sum = 0; cnt = 0
+    prev = ""; last = ""
     for (i = 1; i <= n; i++) if (v[i] != "-") {
-      if (v[i] + 0 < lo) lo = v[i] + 0
-      if (v[i] + 0 > hi) hi = v[i] + 0
+      x = v[i] + 0
+      if (x < lo) lo = x
+      if (x > hi) hi = x
+      sum += x; cnt++
+      prev = last; last = x
     }
-    out = ""
+    out = ""; pc = ""
     for (i = 1; i <= n; i++) {
       if (v[i] == "-") { out = out " "; continue }
-      lvl = (hi > lo) ? int((v[i] - lo) / (hi - lo) * 7 + 0.5) : 4
+      x = v[i] + 0
+      lvl = (hi > lo) ? int((x - lo) / (hi - lo) * 7 + 0.5) : 4
+      c = heat(x)
+      if (c != pc) { out = out c; pc = c }
       out = out bar[lvl + 1]
     }
-    range = (lo <= hi) ? sprintf("%.4g–%.4g", lo, hi) : ""
-    printf "  %-8s %9s  %s  %s", label, cur, out, range
+    if (pc != "") out = out r
+    # Trend arrow: last sample vs the one before, dead-banded to 5% of the
+    # window span so steady-state noise does not flicker.
+    arrow = " "
+    if (prev != "" && hi > lo) {
+      if (last - prev > (hi - lo) * 0.05) arrow = "↗"
+      else if (prev - last > (hi - lo) * 0.05) arrow = "↘"
+    }
+    if (cur == "-") { curtxt = sprintf("%9s", "n/a"); curcol = d }
+    else { curtxt = sprintf("%9s", cur unit); curcol = b heat(cur) }
+    stats = ""
+    if (cnt > 0) stats = sprintf("%.4g–%.4g ~%.4g", lo, hi, sum / cnt)
+    if (extra != "") stats = stats " " extra
+    printf "  %-8s%s%s%s %s%s%s %s  %s%s%s", \
+      label, curcol, curtxt, r, d, arrow, r, out, d, stats, r
   }'
 }
 
-# "62" + "°C" -> "62°C", but a missed sample ("-") -> "n/a".
-_watch_val() { if [[ "$1" == "-" ]]; then echo "n/a"; else echo "$1$2"; fi; }
+# A dim "─ NAME ────…" section rule, sized to the dashboard width.
+# (sed, not tr: tr is byte-oriented and would shred the multibyte ─ glyph.)
+_watch_hdr() {
+  local name="$1" width="$2" fill n
+  n=$(( width - ${#name} - 5 )); (( n < 1 )) && n=1
+  fill="$(printf '%*s' "$n" '' | sed 's/ /─/g')"
+  printf '  \033[2m─ %s %s\033[0m' "$name" "$fill"
+}
+
+# Generation telemetry, straight from a running ComfyUI's own HTTP API
+# (all stock endpoints — /history, /queue, /internal/logs/raw):
+#   - duration of the newest *finished* prompt (an errored one says so),
+#     elapsed time of any in-flight one (in-flight = execution_start with no
+#     terminal message yet, or a non-empty running queue)
+#   - that prompt's node-cache hit rate: nodes listed in its
+#     execution_cached message vs the prompt's total node count — high means
+#     repeat submissions properly reuse static inputs (prompt embeds, VAE…)
+#   - live sampling speed: the newest tqdm "N.NNit/s" (or s/it, inverted) in
+#     the server's terminal ring buffer, only while a prompt is in flight
+#   - queue depth + the running/pending prompt ids (the watch loop timestamps
+#     ids on first sight to measure true submission→saved latency)
+# Prints nine tab-separated fields:
+#   <last gen s|-> <in-flight s|-> <ok|err|-> <finished HH:MM:SS|->
+#   <finished id|-> <cache hit %|-> <queue depth|-> <it/s|-> <qids csv|(empty)>
+_watch_comfy() {
+  python3 -c '
+import json, re, sys, time, urllib.request
+port = sys.argv[1]
+def get(path):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%s%s" % (port, path), timeout=1) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
+TERMINAL = ("execution_success", "execution_error", "execution_interrupted")
+hist = get("/history?max_items=8") or {}
+last = None
+run_start = None
+for hid, item in hist.items():
+    ts = {}
+    cached = None
+    for name, payload in item.get("status", {}).get("messages", []):
+        if isinstance(payload, dict):
+            if "timestamp" in payload:
+                ts[name] = payload["timestamp"]
+            if name == "execution_cached":
+                cached = payload.get("nodes")
+    start = ts.get("execution_start")
+    if start is None:
+        continue
+    ends = [ts[k] for k in TERMINAL if k in ts]
+    if ends:
+        if last is None or max(ends) > last[1]:
+            try:
+                total = len(item["prompt"][2])
+            except Exception:
+                total = 0
+            pct = 100.0 * len(cached) / total if cached is not None and total else None
+            last = (start, max(ends), "execution_success" in ts, hid, pct)
+    elif run_start is None or start > run_start:
+        run_start = start
+q = get("/queue") or {}
+run = [x[1] for x in q.get("queue_running", []) if isinstance(x, list) and len(x) > 1]
+pend = [x[1] for x in q.get("queue_pending", []) if isinstance(x, list) and len(x) > 1]
+depth = len(run) + len(pend) if q else "-"
+gen = act = flag = fin = fid = cache = its = "-"
+if last:
+    gen = "%.1f" % ((last[1] - last[0]) / 1000.0)
+    flag = "ok" if last[2] else "err"
+    fin = time.strftime("%H:%M:%S", time.localtime(last[1] / 1000.0))
+    fid = last[3]
+    if last[4] is not None:
+        cache = "%.0f" % last[4]
+if run_start is not None:
+    act = "%.0f" % (time.time() - run_start / 1000.0)
+elif run:
+    act = "0"
+if act != "-":
+    logs = get("/internal/logs/raw") or {}
+    txt = "".join(e.get("m", "") for e in logs.get("entries", [])[-60:])
+    hits = re.findall(r"([0-9.]+)\s*(it/s|s/it)", txt)
+    if hits:
+        v, u = hits[-1]
+        try:
+            its = "%.2f" % (float(v) if u == "it/s" else (1.0 / float(v)))
+        except (ValueError, ZeroDivisionError):
+            pass
+print("\t".join(str(x) for x in (gen, act, flag, fin, fid, cache, depth, its, ",".join(run + pend))))
+' "$1" 2>/dev/null
+}
 
 cmd_status() {
   # --watch: live dashboard (sparkline timeseries per metric) + an append-only
@@ -836,30 +957,77 @@ cmd_status() {
   if [[ "${1:-}" == "--watch" || "${1:-}" == "-w" ]]; then
     local interval=5 logfile="$BASE_DIR/thermal_monitor.log"
     [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] && interval="$2"
-    local win=40 i tick=0
-    local -a h_temp h_pwr h_clk h_util h_ram h_cpu
+    local i tick=0 cols win width
+    # Sparkline window adapts to the terminal (label+value+stats ≈ 44 cols).
+    cols="$(tput cols 2>/dev/null || echo "${COLUMNS:-100}")"
+    win=$(( cols - 44 )); (( win < 24 )) && win=24; (( win > 64 )) && win=64
+    width=$(( win + 42 ))
+    local -a h_temp h_pwr h_clk h_util h_pst h_thr h_ram h_cache h_swap
+    local -a h_cpu h_load h_io h_rss h_gself h_gother h_gen h_its h_lat h_q h_hit
     # Pre-fill the ring buffers so the sparkline width is constant from tick 1.
     for ((i = 0; i < win; i++)); do
-      h_temp[i]='-' h_pwr[i]='-' h_clk[i]='-' h_util[i]='-' h_ram[i]='-' h_cpu[i]='-'
+      h_temp[i]='-' h_pwr[i]='-' h_clk[i]='-' h_util[i]='-' h_pst[i]='-'
+      h_thr[i]='-' h_ram[i]='-' h_cache[i]='-' h_swap[i]='-' h_cpu[i]='-'
+      h_load[i]='-' h_io[i]='-' h_rss[i]='-' h_gself[i]='-' h_gother[i]='-'
+      h_gen[i]='-' h_its[i]='-' h_lat[i]='-' h_q[i]='-' h_hit[i]='-'
     done
-    local gpu_csv t p c u mem_used mem_tot swap_used swap_tot cpu_pct
-    local prev_idle=0 prev_tot=0 pid cand rss comfy swap_disp
+    local gpu_csv t p c u pst pst_n thr evt evt_val mem_used mem_tot mem_cache
+    local swap_used swap_tot cpu_pct load1 io_now io_rate now_ts prev_io='' prev_ts=''
+    local prev_idle=0 prev_tot=0 pid cand rss proc_hdr swap_disp
+    local gself gother bigname state_flags state_bad
+    local gen_s act_s gen_flag gen_fin gen_extra fin_id cache_hit qdepth its qids qid
+    # Submission→saved latency: prompt ids are timestamped when first seen in
+    # the queue; when one finishes, latency = now - first-seen. Only covers
+    # jobs submitted while the watch is running (resolution = one interval).
+    local -A seen=()
+    local -a qarr
+    local last_lat='-' lat_done=''
+    local BLD=$'\033[1m' DIM=$'\033[2m' RED=$'\033[31m' RST=$'\033[0m'
+    # Probe once for the extended GPU fields (pstate, clock-event flags).
+    # Older drivers that reject them fall back to the minimal set — the state
+    # line then hides itself. (utilization.memory was evaluated and dropped:
+    # the counter reads a constant 0 on GB10 even at 90W full load.)
+    local qgpu="temperature.gpu,power.draw,clocks.sm,utilization.gpu"
+    if nvidia-smi --query-gpu="$qgpu,pstate,clocks_event_reasons.active" \
+         --format=csv,noheader,nounits >/dev/null 2>&1; then
+      qgpu="$qgpu,pstate,clocks_event_reasons.active"
+    fi
+    local drv; drv="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)"
+    # Unified-memory heat thresholds: yellow at 85% of the pool, red at 95%.
+    local mem_warn mem_crit
+    read -r mem_warn mem_crit <<<"$(awk '/^MemTotal:/ {printf "%.0f %.0f", $2*0.85/1048576, $2*0.95/1048576; exit}' /proc/meminfo)"
     local tty=0
     if [[ -t 1 ]]; then tty=1; printf '\033[2J\033[?25l'; trap 'printf "\033[?25h\n"' EXIT
     else log "Logging every ${interval}s to $logfile (Ctrl-C to stop)"; fi
     while true; do
       # ---- sample everything once per tick --------------------------------
-      gpu_csv="$(nvidia-smi --query-gpu=temperature.gpu,power.draw,clocks.sm,utilization.gpu \
+      gpu_csv="$(nvidia-smi --query-gpu="$qgpu" \
                    --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')"
-      IFS=',' read -r t p c u <<<"$gpu_csv"
-      [[ "${t:-}" =~ ^[0-9.]+$ ]] || t='-'
-      [[ "${p:-}" =~ ^[0-9.]+$ ]] || p='-'
-      [[ "${c:-}" =~ ^[0-9.]+$ ]] || c='-'
-      [[ "${u:-}" =~ ^[0-9.]+$ ]] || u='-'
-      read -r mem_used mem_tot swap_used swap_tot <<<"$(awk '
+      IFS=',' read -r t p c u pst evt <<<"$gpu_csv"
+      [[ "${t:-}"   =~ ^[0-9.]+$ ]] || t='-'
+      [[ "${p:-}"   =~ ^[0-9.]+$ ]] || p='-'
+      [[ "${c:-}"   =~ ^[0-9.]+$ ]] || c='-'
+      [[ "${u:-}"   =~ ^[0-9.]+$ ]] || u='-'
+      [[ "${pst:-}" =~ ^P[0-9]+$ ]] || pst='-'
+      evt_val=0
+      [[ "${evt:-}" =~ ^0x[0-9a-fA-F]+$ ]] && evt_val=$(( 16#${evt#0x} )) || evt='-'
+      # Benign vs serious clock-event flags: sw-power-cap (0x4) is normal on
+      # GB10 even at idle; the slowdown bits are the overcurrent/thermal story.
+      state_flags='' state_bad=''
+      (( evt_val & 0x04 ))  && state_flags+=' · sw-power-cap'
+      (( evt_val & 0x08 ))  && state_bad+=' HW-SLOWDOWN'
+      (( evt_val & 0x20 ))  && state_bad+=' SW-THERMAL'
+      (( evt_val & 0x40 ))  && state_bad+=' HW-THERMAL'
+      (( evt_val & 0x80 ))  && state_bad+=' HW-POWER-BRAKE'
+      # Numeric twins for the P-state / throttle rows: P8 -> 8, and the count
+      # of serious slowdown bits (0 = healthy; any spike is the forensic gold).
+      pst_n='-'; [[ "$pst" != '-' ]] && pst_n="${pst#P}"
+      thr='-';   [[ "$evt" != '-' ]] && thr="$(wc -w <<<"$state_bad")"
+      read -r mem_used mem_tot mem_cache swap_used swap_tot <<<"$(awk '
         /^MemTotal:/ {mt=$2} /^MemAvailable:/ {ma=$2}
+        /^Buffers:/ {bu=$2} /^Cached:/ {ca=$2}
         /^SwapTotal:/ {st=$2} /^SwapFree:/ {sf=$2}
-        END {printf "%.1f %.0f %.1f %.0f", (mt-ma)/1048576, mt/1048576, (st-sf)/1048576, st/1048576}
+        END {printf "%.1f %.0f %.1f %.1f %.0f", (mt-ma)/1048576, mt/1048576, (bu+ca)/1048576, (st-sf)/1048576, st/1048576}
         ' /proc/meminfo)"
       # Whole-box CPU% from the /proc/stat delta (first tick has no delta yet)
       read -r cpu_pct prev_idle prev_tot <<<"$(awk -v pi="$prev_idle" -v pt="$prev_tot" '
@@ -868,53 +1036,135 @@ cmd_status() {
                  pct = (pt > 0 && tot > pt) ? 100 * (1 - (idle - pi) / (tot - pt)) : -1
                  printf "%.0f %d %d", pct, idle, tot; exit}' /proc/stat)"
       [[ "$cpu_pct" == "-1" ]] && cpu_pct='-'
-      h_temp=("${h_temp[@]:1}" "$t");        h_pwr=("${h_pwr[@]:1}" "$p")
-      h_clk=("${h_clk[@]:1}" "$c");          h_util=("${h_util[@]:1}" "$u")
-      h_ram=("${h_ram[@]:1}" "$mem_used");   h_cpu=("${h_cpu[@]:1}" "$cpu_pct")
-
+      read -r load1 _ </proc/loadavg
+      # Disk throughput (MB/s, read+write) over real block devices, from the
+      # /proc/diskstats sector-count delta — model loads show up here.
+      io_now="$(awk '$3 ~ /^(nvme[0-9]+n[0-9]+|sd[a-z]+)$/ {s += ($6 + $10) * 512}
+                     END {printf "%.0f", s}' /proc/diskstats)"
+      now_ts="${EPOCHREALTIME/,/.}"   # decimal separator is locale-dependent
+      io_rate="$(awk -v a="$prev_io" -v b="$io_now" -v t0="$prev_ts" -v t1="$now_ts" \
+        'BEGIN { if (a == "" || t1 - t0 <= 0) { print "-"; exit }
+                 printf "%.1f", (b - a) / (t1 - t0) / 1048576 }')"
+      prev_io="$io_now"; prev_ts="$now_ts"
       # Prefer the actual python server over wrapper shells whose command
       # line merely contains the launch string (bash -c, script(1), sudo…).
-      comfy="not running" pid=""
+      pid=""
       for cand in $(pgrep -f 'main.py --listen' 2>/dev/null); do
         pid="${pid:-$cand}"   # fallback: first match
         if [[ "$(cat "/proc/$cand/comm" 2>/dev/null)" == python* ]]; then
           pid="$cand"; break
         fi
       done
+      rss='-'
       if [[ -n "$pid" ]]; then
         rss="$(awk '/^VmRSS:/ {printf "%.1f", $2/1048576}' "/proc/$pid/status" 2>/dev/null || true)"
-        comfy="RUNNING pid $pid rss ${rss:-?}G"
+        [[ -n "$rss" ]] || rss='-'
+        proc_hdr="PROCESSES · ComfyUI pid $pid"
         pgrep -af 'main.py --listen' 2>/dev/null | grep -q 'use-sage-attention' \
-          && comfy+=" [SageAttention]"
+          && proc_hdr+=" [SageAttention]"
+      else
+        proc_hdr="PROCESSES · ComfyUI not running"
+      fi
+      # Who holds the unified pool: ComfyUI's own CUDA allocation vs the sum
+      # of every co-resident process (vLLM…) — the latter explains "why is
+      # generation suddenly offloading". bigname = largest co-resident holder.
+      gself='-' gother='-' bigname=''
+      IFS=$'\t' read -r gself gother bigname <<<"$(nvidia-smi \
+        --query-compute-apps=pid,process_name,used_memory \
+        --format=csv,noheader,nounits 2>/dev/null | awk -F', *' -v comfy="${pid:-x}" '
+          { name = $2; sub(/.*\//, "", name); gb = $3 / 1024
+            if ($1 == comfy) self += gb
+            else { other += gb; if (gb > big) { big = gb; bigname = name } } }
+          END { printf "%.1f\t%.1f\t%s", self, other, bigname }')"
+      [[ -n "$gself" ]]  || gself='-'
+      [[ -n "$gother" ]] || gother='-'
+      # Generation telemetry from ComfyUI's own API (see _watch_comfy). A gen
+      # in flight at the moment of a silent reboot is the smoking gun the log
+      # exists for, so the numbers go into the evidence line too.
+      gen_s='-' act_s='-' gen_flag='-' gen_fin='-' fin_id='-' cache_hit='-' qdepth='-' its='-' qids=''
+      [[ -n "$pid" ]] && IFS=$'\t' read -r gen_s act_s gen_flag gen_fin fin_id cache_hit qdepth its qids \
+        <<<"$(_watch_comfy "$PORT")"
+      [[ -n "$gen_s" ]]     || gen_s='-'
+      [[ -n "$act_s" ]]     || act_s='-'
+      [[ -n "$gen_flag" ]]  || gen_flag='-'
+      [[ -n "$gen_fin" ]]   || gen_fin='-'
+      [[ -n "$fin_id" ]]    || fin_id='-'
+      [[ -n "$cache_hit" ]] || cache_hit='-'
+      [[ -n "$qdepth" ]]    || qdepth='-'
+      [[ -n "$its" ]]       || its='-'
+      gen_extra=''
+      [[ "$gen_fin" != '-' ]]    && gen_extra="at $gen_fin"
+      [[ "$gen_flag" == 'err' ]] && gen_extra+=" ${RED}ERROR${RST}"
+      [[ "$act_s" != '-' ]]      && gen_extra+="${gen_extra:+ · }now ${act_s}s…"
+      # Latency check MUST run before the populate/prune below: on the very
+      # tick a gen finishes the queue is already empty and idle, and pruning
+      # first would wipe the finished id's first-seen timestamp.
+      if [[ "$fin_id" != '-' && "$fin_id" != "$lat_done" && -n "${seen[$fin_id]:-}" ]]; then
+        last_lat=$(( EPOCHSECONDS - seen[$fin_id] ))
+        lat_done="$fin_id"
+        unset "seen[$fin_id]"
+      fi
+      if [[ -n "$qids" ]]; then
+        IFS=',' read -ra qarr <<<"$qids"
+        for qid in "${qarr[@]}"; do
+          [[ -n "${seen[$qid]:-}" ]] || seen[$qid]="$EPOCHSECONDS"
+        done
+      elif [[ "$act_s" == '-' ]]; then
+        seen=()   # queue drained and idle: forget cancelled/stale ids
       fi
       if [[ "$swap_tot" == "0" ]]; then swap_disp="disabled (good)"
-      else swap_disp="${swap_used}/${swap_tot}G (ENABLED — run tune!)"; fi
+      else swap_disp="of ${swap_tot}G ${RED}ENABLED — run tune!${RST}"; fi
+      h_temp=("${h_temp[@]:1}" "$t");        h_pwr=("${h_pwr[@]:1}" "$p")
+      h_clk=("${h_clk[@]:1}" "$c");          h_util=("${h_util[@]:1}" "$u")
+      h_pst=("${h_pst[@]:1}" "$pst_n");      h_thr=("${h_thr[@]:1}" "$thr")
+      h_ram=("${h_ram[@]:1}" "$mem_used");   h_cache=("${h_cache[@]:1}" "$mem_cache")
+      h_swap=("${h_swap[@]:1}" "$swap_used"); h_cpu=("${h_cpu[@]:1}" "$cpu_pct")
+      h_load=("${h_load[@]:1}" "$load1");    h_io=("${h_io[@]:1}" "$io_rate")
+      h_rss=("${h_rss[@]:1}" "$rss");        h_gself=("${h_gself[@]:1}" "$gself")
+      h_gother=("${h_gother[@]:1}" "$gother"); h_gen=("${h_gen[@]:1}" "$gen_s")
+      h_its=("${h_its[@]:1}" "$its");        h_lat=("${h_lat[@]:1}" "$last_lat")
+      h_q=("${h_q[@]:1}" "$qdepth");         h_hit=("${h_hit[@]:1}" "$cache_hit")
 
       # ---- durable evidence line (always) ----------------------------------
-      printf '%(%F %T)T GPU=%s°C PWR=%sW SM=%sMHz UTIL=%s%% RAM=%s/%sG SWAP=%sG CPU=%s%%\n' \
-        -1 "$t" "$p" "$c" "$u" "$mem_used" "$mem_tot" "$swap_used" "$cpu_pct" >>"$logfile"
+      printf '%(%F %T)T GPU=%s°C PWR=%sW SM=%sMHz UTIL=%s%% RAM=%s/%sG SWAP=%sG CPU=%s%% CACHE=%sG LOAD=%s IO=%sMB/s RSS=%sG CGPU=%sG OGPU=%sG PST=%s EVT=%s GEN=%ss ACT=%ss ITS=%s LAT=%ss Q=%s HIT=%s%%\n' \
+        -1 "$t" "$p" "$c" "$u" "$mem_used" "$mem_tot" "$swap_used" "$cpu_pct" \
+        "$mem_cache" "$load1" "$io_rate" "$rss" "$gself" "$gother" "$pst" "$evt" \
+        "$gen_s" "$act_s" "$its" "$last_lat" "$qdepth" "$cache_hit" >>"$logfile"
 
       # ---- live view --------------------------------------------------------
       if (( tty )); then
         (( tick++ )) || true
         printf '\033[H'
         printf '%s\033[K\n' \
-          "spark-comfyui v$VERSION — live telemetry, every ${interval}s (window $((win * interval))s) — Ctrl-C stops" \
-          "log: $logfile" \
+          "${BLD}spark-comfyui v$VERSION${RST} — $(hostname)${drv:+ · driver $drv} — every ${interval}s, window $((win * interval))s — Ctrl-C stops" \
+          "${DIM}log: $logfile${RST}" \
           "" \
-          "$(_watch_row "temp"    "$(_watch_val "$t" "°C")"       "${h_temp[*]}")" \
-          "$(_watch_row "power"   "$(_watch_val "$p" "W")"        "${h_pwr[*]}")" \
-          "$(_watch_row "sm clk"  "$(_watch_val "$c" "MHz")"      "${h_clk[*]}")" \
-          "$(_watch_row "gpu"     "$(_watch_val "$u" "%")"        "${h_util[*]}")" \
-          "$(_watch_row "unified" "${mem_used}G"                  "${h_ram[*]}")  of ${mem_tot}G" \
-          "$(_watch_row "cpu"     "$(_watch_val "$cpu_pct" "%")"  "${h_cpu[*]}")" \
+          "$(_watch_hdr "GPU" "$width")" \
+          "$(_watch_row "temp"     "$t"          "°C"  "${h_temp[*]}"  70 80)" \
+          "$(_watch_row "power"    "$p"          "W"   "${h_pwr[*]}"   60 80)" \
+          "$(_watch_row "sm clk"   "$c"          "MHz" "${h_clk[*]}")" \
+          "$(_watch_row "gpu"      "$u"          "%"   "${h_util[*]}")" \
+          "$(_watch_row "pstate"   "$pst"        ""    "${h_pst[*]}"   "" "" "${state_flags# · }")" \
+          "$(_watch_row "throttle" "$thr"        ""    "${h_thr[*]}"   1 1 "${state_bad# }")" \
+          "$(_watch_hdr "UNIFIED MEMORY" "$width")" \
+          "$(_watch_row "used"     "$mem_used"   "G"   "${h_ram[*]}"   "$mem_warn" "$mem_crit" "of ${mem_tot}G")" \
+          "$(_watch_row "cache"    "$mem_cache"  "G"   "${h_cache[*]}")" \
+          "$(_watch_row "swap"     "$swap_used"  "G"   "${h_swap[*]}"  0.1 1 "$swap_disp")" \
+          "$(_watch_hdr "SYSTEM" "$width")" \
+          "$(_watch_row "cpu"      "$cpu_pct"    "%"   "${h_cpu[*]}"   85 95)" \
+          "$(_watch_row "load 1m"  "$load1"      ""    "${h_load[*]}")" \
+          "$(_watch_row "disk io"  "$io_rate"    "MB/s" "${h_io[*]}")" \
+          "$(_watch_hdr "$proc_hdr" "$width")" \
+          "$(_watch_row "rss"      "$rss"        "G"   "${h_rss[*]}")" \
+          "$(_watch_row "gpu self" "$gself"      "G"   "${h_gself[*]}")" \
+          "$(_watch_row "co-res"   "$gother"     "G"   "${h_gother[*]}" "" "" "${bigname:0:18}")" \
+          "$(_watch_row "gen"      "$gen_s"      "s"   "${h_gen[*]}"   "" "" "$gen_extra")" \
+          "$(_watch_row "it/s"     "$its"        ""    "${h_its[*]}")" \
+          "$(_watch_row "latency"  "$last_lat"   "s"   "${h_lat[*]}")" \
+          "$(_watch_row "queue"    "$qdepth"     ""    "${h_q[*]}")" \
+          "$(_watch_row "hit rate" "$cache_hit"  "%"   "${h_hit[*]}")" \
           "" \
-          "  swap: $swap_disp" \
-          "  ComfyUI: $comfy" \
-          "" \
-          "  a power spike as the LAST sample before a silent reboot = overcurrent" \
-          "  -> fix: $0 tune --clock-cap 2100" \
-          "  samples: $tick"
+          "  ${DIM}samples: $tick · elapsed: $((SECONDS / 60))m$(printf '%02d' $((SECONDS % 60)))s${RST}"
         printf '\033[J'
       else
         tail -1 "$logfile"
