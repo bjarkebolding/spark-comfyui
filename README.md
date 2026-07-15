@@ -4,7 +4,7 @@
 
 ## Quick start
 
-Needs: a DGX Spark (GB10) on DGX OS — the NVIDIA driver, CUDA 13.x toolkit, and Python 3.12 all ship with it — plus ~15 GB of disk before models.
+Needs: a DGX Spark (GB10) on DGX OS (the NVIDIA driver, CUDA 13.x toolkit, and Python 3.12 all ship with it), plus ~15 GB of disk before models.
 
 ```bash
 git clone https://github.com/bjarkebolding/spark-comfyui.git
@@ -15,18 +15,18 @@ cd spark-comfyui
 ./spark-comfyui.sh update           # now and then: updates itself + ComfyUI + deps, self-heals
 ```
 
-Everything installs under the directory the script lives in — fully relocatable, idempotent, safe to re-run. `sudo` is only invoked when a system package is missing or a `tune` setting isn't already applied. Deep GB10 details live in [CLAUDE.md](CLAUDE.md) and [mods/README.md](mods/README.md).
+Everything installs under the directory the script lives in. Fully relocatable, idempotent, safe to re-run. `sudo` is only invoked when a system package is missing or a `tune` setting isn't already applied. Deep GB10 details live in [CLAUDE.md](CLAUDE.md) and [mods/README.md](mods/README.md).
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `install [--with-service]` | Full setup: PyTorch cu130 → ComfyUI + Manager deps → the mods pass (setuptools pin, torch verify, Manager config, SageAttention built natively + kernel-verified, GPU onnxruntime). Re-running refreshes rather than breaks. |
+| `install [--with-service]` | Full setup: PyTorch cu130, then ComfyUI + Manager deps, then the mods pass (setuptools pin, torch verify, Manager config, SageAttention built natively and kernel-verified, GPU onnxruntime). Re-running refreshes rather than breaks. |
 | `run [args...]` | Starts ComfyUI with GB10-tuned flags and environment. Extra args pass through to `main.py`. Re-verifies the SageAttention kernel before every launch and auto-rebuilds if something broke it. |
 | `stop` | Stops ComfyUI (systemd service or foreground process). |
-| `update [--torch] [--rollback]` | Self-updates spark-comfyui itself first (git fast-forward, only when this repo has newer commits), then updates ComfyUI + dependencies; rebuilds SageAttention only when needed; repairs anything shadowed; ends with a clear summary. `--torch` upgrades PyTorch (forces a Sage rebuild). `--rollback` returns to the pre-update revision. |
+| `update [--torch] [--rollback]` | Self-updates spark-comfyui itself first (git fast-forward, only when this repo has newer commits), then updates ComfyUI and dependencies, rebuilds SageAttention only when needed, repairs anything shadowed, and ends with a clear summary. `--torch` upgrades PyTorch (forces a Sage rebuild). `--rollback` returns to the pre-update revision. |
 | `doctor` | Full health check. Verifies every optimization is present **and active**, and diagnoses the GB10 silent-drift traps: shadowed torch/SageAttention/onnxruntime, silent attention fallbacks, dead quantization (NVFP4) backend, stale toolchain, swap, stuck clocks. Every failure names its fix. |
-| `status [--watch [SEC]]` | One-page glance: process, GPU temp/power/memory, versions, branch, config. `--watch` opens a live dashboard (every 5s or `SEC`): heat-colored sparkline timeseries for GPU/memory/system health, quiet-when-healthy rows (throttle flags, swap, generation telemetry from ComfyUI's own API) that appear only when they have a story, and a **`session:` summary made for A/B testing** — gen count, first vs steady duration, mean it/s. Every sample lands in `thermal_monitor.log` (incl. per-process GPU memory — co-resident LLMs show up there): post-mortem evidence for silent hard-reboots. |
+| `status [--watch [SEC]]` | One-page glance: process, GPU temp/power/memory, versions, branch, config. `--watch` opens a live dashboard (every 5s or `SEC`): heat-colored sparkline timeseries for GPU, memory and system health, rows that appear only when they carry information (throttle flags, swap, generation telemetry from ComfyUI's own API), and a `session:` summary made for A/B testing (gen count, first vs steady duration, mean it/s). Every sample lands in `thermal_monitor.log`, including per-process GPU memory, so co-resident LLMs show up there. That log is the post-mortem evidence for silent hard-reboots. |
 | `tune [--clock-cap MHZ] [--persist]` | System stability: disables swap, sets GPU persistence mode, optional clock cap. `--persist` makes it survive reboots via systemd. |
 | `service` | Installs and starts a systemd user service (auto-start, restart-on-failure, survives logout). |
 
@@ -34,7 +34,7 @@ Everything installs under the directory the script lives in — fully relocatabl
 
 ## What it looks like
 
-A routine `update` — the tool self-updates first, ComfyUI moves forward, every mod re-verifies itself, and the summary says whether a restart is needed:
+A routine `update`. The tool self-updates first, ComfyUI moves forward, every mod re-verifies itself, and the summary says whether a restart is needed:
 
 ```console
 $ ./spark-comfyui.sh update
@@ -76,7 +76,7 @@ onnxruntime: OK — GPU provider live
 Changes applied — restart to pick them up: ./spark-comfyui.sh run
 ```
 
-A healthy `doctor` (banner cropped) — every optimization is checked **live**, not by version strings, and any failure names its exact fix:
+A healthy `doctor` (banner cropped). Every optimization is checked **live**, not by version strings, and any failure names its exact fix:
 
 ```console
 $ ./spark-comfyui.sh doctor
@@ -139,9 +139,9 @@ $ ./spark-comfyui.sh doctor
   No silent-drift issues detected.
 ```
 
-`status --watch` during a run. **Every line is a timeseries**, heat-colored by value, and the dashboard is *quiet when healthy*: throttle flags, swap and generation telemetry only get a row when there's something to say — each arriving with its window history intact, since sampling never stops.
+`status --watch` during a run. Every line is a timeseries, heat-colored by value. Rows for throttle flags, swap and generation telemetry render only when they carry information, and each appears with its window history intact because sampling never stops.
 
-The GENERATION section (its header names the attention backend) comes straight from ComfyUI's own API: `gen` duration history with the in-flight one ticking in the margin, live sampling speed (`it/s` — a drop mid-window means throttling or background load), `latency` from queue submission to saved output, queue depth, and the node-cache `hit rate` (high = repeat jobs are properly reusing prompt embeds and loaded models). Every sample also lands in `thermal_monitor.log` so the trail survives a hard reboot:
+The GENERATION section (its header names the attention backend) comes from ComfyUI's own API: `gen` duration history with the in-flight one ticking in the margin, live sampling speed (`it/s`; a drop mid-window means throttling or background load), `latency` from queue submission to saved output, queue depth, and the node-cache `hit rate` (high means repeat jobs reuse prompt embeds and loaded models). Every sample also lands in `thermal_monitor.log` so the trail survives a hard reboot:
 
 ```console
 $ ./spark-comfyui.sh status --watch 3
@@ -168,9 +168,9 @@ log: /home/user/spark-comfyui/thermal_monitor.log
   samples: 35 · elapsed: 1m49s
 ```
 
-The `session:` line is built for **A/B testing**. It aggregates every gen that finished under this watch: `first` carries the model-load cost, `steady` (with min–max) excludes it, plus the session-mean sampling rate and an error count if any. Stats reset each launch and gens that predate the watch never count — so run one watch per condition (a flag, a clock cap, a co-resident LLM…) and compare the two lines.
+The `session:` line is made for A/B testing. It aggregates every gen that finished under this watch: `first` carries the model-load cost, `steady` (with min and max) excludes it, plus the session-mean sampling rate and an error count if any. Stats reset each launch and gens that predate the watch never count. Run one watch per condition (a flag, a clock cap, a co-resident LLM) and compare the two lines.
 
-Idle and healthy, the same dashboard is seven rows — everything else has to earn its line (throttle only after a real slowdown flag, swap only if it exists, gen telemetry only with data):
+Idle and healthy, the dashboard is seven rows. Throttle renders only after a real slowdown flag, swap only if it exists, gen telemetry only with data:
 
 ```console
   ─ GPU ──────────────────────────────────────────────────────────────────────
@@ -197,7 +197,7 @@ branch:some-origin-branch                            # a branch on origin
 remote:https://github.com/user/ComfyUI.git branch    # a fork's branch
 ```
 
-On every install/update, a `spark-patched` branch is **rebuilt from scratch**: fresh upstream master, then each entry merged in order. Master stays pristine. Conflicting entries are skipped with a warning; entries already merged upstream are flagged for removal. Empty list (the default) = plain master tracking, which as of mid-2026 is the optimal configuration.
+On every install/update, a `spark-patched` branch is rebuilt from scratch: fresh upstream master, then each entry merged in order. Master stays pristine. Conflicting entries are skipped with a warning; entries already merged upstream are flagged for removal. Empty list (the default) means plain master tracking, which as of mid-2026 is the optimal configuration.
 
 ## Troubleshooting
 
@@ -209,20 +209,20 @@ Start with:
 
 Every check prints PASS/FAIL and, on failure, the exact command that fixes it. Common ones:
 
-- **`no kernel image is available for execution on the device`** — stale/shadowed SageAttention build or pre-13.0 toolchain. `doctor` pinpoints which; `update` rebuilds.
-- **Sudden slowness after installing a custom node** — usually shadowed torch or onnxruntime. `update` repairs both automatically.
-- **Silent hard-reboot during video generation** — run `status --watch`, reproduce, check the last logged lines: a power spike right before death means overcurrent → `tune --clock-cap 2100`.
-- **Everything runs but much slower than it should** — `doctor` checks ComfyUI's own log for silent per-call SageAttention fallbacks and for GPU clocks stuck low after a prior OOM/power event (the latter needs a full power cycle, not a reboot).
-- **Whole machine freezes near memory limit** — swap thrash on unified memory → `tune` (disables swap; you get a clean OOM kill instead).
-- **Manager says an action is not allowed** — lower `security_level` in `ComfyUI/user/__manager/config.ini` temporarily (`normal-` or `weak`), restore it afterward.
-- **Capability warning at startup** (`sm_121 exceeds torch's supported maximum`) — expected on GB10, harmless; PTX JIT covers it.
+- **`no kernel image is available for execution on the device`**: stale/shadowed SageAttention build or pre-13.0 toolchain. `doctor` pinpoints which; `update` rebuilds.
+- **Sudden slowness after installing a custom node**: usually shadowed torch or onnxruntime. `update` repairs both automatically.
+- **Silent hard-reboot during video generation**: run `status --watch`, reproduce, check the last logged lines. A power spike right before death means overcurrent; fix with `tune --clock-cap 2100`.
+- **Everything runs but much slower than it should**: `doctor` checks ComfyUI's own log for silent per-call SageAttention fallbacks and for GPU clocks stuck low after a prior OOM/power event (the latter needs a full power cycle, not a reboot).
+- **Whole machine freezes near memory limit**: swap thrash on unified memory. Run `tune` (disables swap; you get a clean OOM kill instead).
+- **Manager says an action is not allowed**: lower `security_level` in `ComfyUI/user/__manager/config.ini` temporarily (`normal-` or `weak`), restore it afterward.
+- **Capability warning at startup** (`sm_121 exceeds torch's supported maximum`): expected on GB10, harmless; PTX JIT covers it.
 - **Spark rebooted mid-update?** The DGX Dashboard's system-update flow always ends in an automatic reboot. Don't run `spark-comfyui.sh update` in the same window as a system/firmware update.
 
 ## Security notes
 
-- `network_mode = personal_cloud` relaxes Manager's security gating so it works while serving on `0.0.0.0`. Fine on a trusted LAN — **do not** expose the port directly to the internet.
-- The GPU onnxruntime wheel and any patch-list forks are community builds, not NVIDIA/Comfy-Org releases. Review what you point the script at; that's the trade-off for running hardware this new.
+- `network_mode = personal_cloud` relaxes Manager's security gating so it works while serving on `0.0.0.0`. Fine on a trusted LAN. Do not expose the port directly to the internet.
+- The GPU onnxruntime wheel and any patch-list forks are community builds, not NVIDIA/Comfy-Org releases. Review what you point the script at.
 
 ---
 
-MIT — see [LICENSE](LICENSE). The GB10 knowledge encoded here comes from the NVIDIA DGX Spark developer forums, the [dgx-spark-playbooks](https://github.com/NVIDIA/dgx-spark-playbooks), and the community projects that mapped this hardware in public.
+MIT, see [LICENSE](LICENSE). The GB10 knowledge encoded here comes from the NVIDIA DGX Spark developer forums, the [dgx-spark-playbooks](https://github.com/NVIDIA/dgx-spark-playbooks), and the community projects that mapped this hardware in public.
