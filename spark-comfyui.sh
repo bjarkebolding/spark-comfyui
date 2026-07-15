@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.07.15 | License: MIT
+#  Version 2026.07.15.1 | License: MIT
 # =============================================================================
 #  One script for the whole lifecycle, tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory.
@@ -53,7 +53,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.07.15"
+VERSION="2026.07.15.1"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -970,19 +970,23 @@ cmd_status() {
     win=$(( cols - 44 )); (( win < 24 )) && win=24; (( win > 64 )) && win=64
     width=$(( win + 42 ))
     local -a h_temp h_pwr h_clk h_util h_thr h_ram h_swap
-    local -a h_cpu h_io h_rss h_gself h_gother h_gen h_its h_lat h_q h_hit
+    local -a h_cpu h_io h_gen h_its h_lat h_q h_hit
     # Pre-fill the ring buffers so the sparkline width is constant from tick 1.
     for ((i = 0; i < win; i++)); do
       h_temp[i]='-' h_pwr[i]='-' h_clk[i]='-' h_util[i]='-'
       h_thr[i]='-' h_ram[i]='-' h_swap[i]='-' h_cpu[i]='-'
-      h_io[i]='-' h_rss[i]='-' h_gself[i]='-' h_gother[i]='-'
-      h_gen[i]='-' h_its[i]='-' h_lat[i]='-' h_q[i]='-' h_hit[i]='-'
+      h_io[i]='-' h_gen[i]='-' h_its[i]='-' h_lat[i]='-' h_q[i]='-' h_hit[i]='-'
     done
     local gpu_csv t p c u pst thr evt evt_val mem_used mem_tot mem_cache
     local swap_used swap_tot cpu_pct load1 io_now io_rate now_ts prev_io='' prev_ts=''
-    local prev_idle=0 prev_tot=0 pid cand rss proc_hdr
-    local gself gother bigname state_bad
+    local prev_idle=0 prev_tot=0 pid cand rss gen_hdr
+    local gself gother state_bad
     local -a lines
+    # Session A/B aggregates (see the fin_id accounting in the loop): g_durs
+    # holds the duration of every successful gen finished under this watch,
+    # in order; the render distills them into the "session:" summary line.
+    local g_base='' g_init=0 g_err=0 gsum
+    local -a g_durs=() its_hist=()
     local gen_s act_s gen_flag gen_fin gen_extra fin_id cache_hit qdepth its qids qid
     # Submission→saved latency: prompt ids are timestamped when first seen in
     # the queue; when one finishes, latency = now - first-seen. Only covers
@@ -1066,23 +1070,25 @@ cmd_status() {
       if [[ -n "$pid" ]]; then
         rss="$(awk '/^VmRSS:/ {printf "%.1f", $2/1048576}' "/proc/$pid/status" 2>/dev/null || true)"
         [[ -n "$rss" ]] || rss='-'
-        proc_hdr="PROCESSES · ComfyUI pid $pid"
-        pgrep -af 'main.py --listen' 2>/dev/null | grep -q 'use-sage-attention' \
-          && proc_hdr+=" [SageAttention]"
+        # The attention backend is the classic A/B dimension, so it lives in
+        # the section header as run context.
+        if pgrep -af 'main.py --listen' 2>/dev/null | grep -q 'use-sage-attention'
+        then gen_hdr="GENERATION · SageAttention"
+        else gen_hdr="GENERATION · SDPA"; fi
       else
-        proc_hdr="PROCESSES · ComfyUI not running"
+        gen_hdr="GENERATION · ComfyUI not running"
       fi
       # Who holds the unified pool: ComfyUI's own CUDA allocation vs the sum
       # of every co-resident process (vLLM…) — the latter explains "why is
-      # generation suddenly offloading". bigname = largest co-resident holder.
-      gself='-' gother='-' bigname=''
-      IFS=$'\t' read -r gself gother bigname <<<"$(nvidia-smi \
-        --query-compute-apps=pid,process_name,used_memory \
+      # generation suddenly offloading". Log-only since 2026.07.15.1 (CGPU/
+      # OGPU fields); no dashboard row.
+      gself='-' gother='-'
+      IFS=$'\t' read -r gself gother <<<"$(nvidia-smi \
+        --query-compute-apps=pid,used_memory \
         --format=csv,noheader,nounits 2>/dev/null | awk -F', *' -v comfy="${pid:-x}" '
-          { name = $2; sub(/.*\//, "", name); gb = $3 / 1024
-            if ($1 == comfy) self += gb
-            else { other += gb; if (gb > big) { big = gb; bigname = name } } }
-          END { printf "%.1f\t%.1f\t%s", self, other, bigname }')"
+          { gb = $2 / 1024
+            if ($1 == comfy) self += gb; else other += gb }
+          END { printf "%.1f\t%.1f", self, other }')"
       [[ -n "$gself" ]]  || gself='-'
       [[ -n "$gother" ]] || gother='-'
       # No pid -> "ComfyUI's own allocation" is not a number, it's a non-fact
@@ -1106,6 +1112,18 @@ cmd_status() {
       [[ "$gen_fin" != '-' ]]    && gen_extra="at $gen_fin"
       [[ "$gen_flag" == 'err' ]] && gen_extra+=" ${RED}ERROR${RST}"
       [[ "$act_s" != '-' ]]      && gen_extra+="${gen_extra:+ · }now ${act_s}s…"
+      # Session A/B aggregates: every gen that *finishes while the watch is
+      # running* is recorded exactly once — whatever fin_id says on the first
+      # tick is only a baseline, so history predating this watch never skews
+      # a bench run. One watch session per A/B condition = one summary line.
+      if (( ! g_init )); then
+        g_base="$fin_id"; g_init=1
+      elif [[ "$fin_id" != '-' && "$fin_id" != "$g_base" ]]; then
+        g_base="$fin_id"
+        if [[ "$gen_flag" == 'err' ]]; then (( g_err++ )) || true
+        elif [[ "$gen_s" != '-' ]]; then g_durs+=("$gen_s"); fi
+      fi
+      [[ "$its" != '-' ]] && its_hist+=("$its")
       # Latency check MUST run before the populate/prune below: on the very
       # tick a gen finishes the queue is already empty and idle, and pruning
       # first would wipe the finished id's first-seen timestamp.
@@ -1126,9 +1144,7 @@ cmd_status() {
       h_clk=("${h_clk[@]:1}" "$c");          h_util=("${h_util[@]:1}" "$u")
       h_thr=("${h_thr[@]:1}" "$thr");        h_ram=("${h_ram[@]:1}" "$mem_used")
       h_swap=("${h_swap[@]:1}" "$swap_used"); h_cpu=("${h_cpu[@]:1}" "$cpu_pct")
-      h_io=("${h_io[@]:1}" "$io_rate")
-      h_rss=("${h_rss[@]:1}" "$rss");        h_gself=("${h_gself[@]:1}" "$gself")
-      h_gother=("${h_gother[@]:1}" "$gother"); h_gen=("${h_gen[@]:1}" "$gen_s")
+      h_io=("${h_io[@]:1}" "$io_rate");      h_gen=("${h_gen[@]:1}" "$gen_s")
       h_its=("${h_its[@]:1}" "$its");        h_lat=("${h_lat[@]:1}" "$last_lat")
       h_q=("${h_q[@]:1}" "$qdepth");         h_hit=("${h_hit[@]:1}" "$cache_hit")
 
@@ -1142,13 +1158,36 @@ cmd_status() {
       # Quiet-when-healthy: rows whose healthy state is a flat line of zeros
       # or n/a earn their spot only when they have a story — throttle after
       # any slowdown bit in the window, swap only when it exists at all,
-      # co-res only while another process holds the pool, gen telemetry only
-      # with data (and the process rows only while ComfyUI runs; the section
-      # header already says "not running"). Ring buffers always advance, so
-      # a row appears with its window history intact. The log line is NOT
-      # conditional — it always carries every field.
+      # gen telemetry only with data. Ring buffers always advance, so a row
+      # appears with its window history intact. The log line is NOT
+      # conditional — it always carries every field (incl. RSS and the
+      # per-process GPU split, which have no dashboard row anymore).
       if (( tty )); then
         (( tick++ )) || true
+        # The A/B line: first gen carries the model load, steady excludes it
+        # — compare "steady" between two watch sessions run under different
+        # conditions (flags, clock caps, co-resident load…).
+        gsum=''
+        if (( ${#g_durs[@]} + g_err )); then
+          gsum="$(awk -v d="${g_durs[*]}" -v e="$g_err" -v its="${its_hist[*]}" 'BEGIN {
+            n = split(d, v, " ")
+            out = sprintf("session: %d gen%s", n + e, (n + e == 1) ? "" : "s")
+            if (n >= 1) out = out sprintf(" · first %.1fs", v[1])
+            if (n >= 2) {
+              sum = 0; lo = 1e30; hi = -1e30
+              for (i = 2; i <= n; i++) {
+                sum += v[i]
+                if (v[i] < lo) lo = v[i]
+                if (v[i] > hi) hi = v[i]
+              }
+              out = out sprintf(" · steady ~%.1fs (%.4g–%.4g)", sum / (n - 1), lo, hi)
+            }
+            m = split(its, w, " ")
+            if (m) { s = 0; for (i = 1; i <= m; i++) s += w[i]
+                     out = out sprintf(" · ~%.2f it/s", s / m) }
+            if (e) out = out sprintf(" · %d errored", e)
+            print out }')"
+        fi
         lines=(
           "${BLD}spark-comfyui v$VERSION${RST} — $(hostname)${drv:+ · driver $drv} — every ${interval}s, window $((win * interval))s — Ctrl-C stops"
           "${DIM}log: $logfile${RST}"
@@ -1170,14 +1209,8 @@ cmd_status() {
         lines+=(
           "$(_watch_row "cpu"     "$cpu_pct" "%"    "${h_cpu[*]}" 85 95)"
           "$(_watch_row "disk io" "$io_rate" "MB/s" "${h_io[*]}")"
-          "$(_watch_hdr "$proc_hdr" "$width")"
+          "$(_watch_hdr "$gen_hdr" "$width")"
         )
-        _series_any "${h_rss[@]}" && lines+=(
-          "$(_watch_row "rss" "$rss" "G" "${h_rss[*]}")")
-        _series_any "${h_gself[@]}" && lines+=(
-          "$(_watch_row "gpu self" "$gself" "G" "${h_gself[*]}")")
-        _series_nonzero "${h_gother[@]}" && lines+=(
-          "$(_watch_row "co-res" "$gother" "G" "${h_gother[*]}" "" "" "${bigname:0:18}")")
         { _series_any "${h_gen[@]}" || [[ "$act_s" != '-' ]]; } && lines+=(
           "$(_watch_row "gen" "$gen_s" "s" "${h_gen[*]}" "" "" "$gen_extra")")
         _series_any "${h_its[@]}" && lines+=(
@@ -1188,6 +1221,7 @@ cmd_status() {
           "$(_watch_row "queue" "$qdepth" "" "${h_q[*]}")")
         _series_any "${h_hit[@]}" && lines+=(
           "$(_watch_row "hit rate" "$cache_hit" "%" "${h_hit[*]}")")
+        [[ -n "$gsum" ]] && lines+=("  ${DIM}${gsum}${RST}")
         lines+=(
           ""
           "  ${DIM}samples: $tick · elapsed: $((SECONDS / 60))m$(printf '%02d' $((SECONDS % 60)))s${RST}"

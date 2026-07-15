@@ -26,7 +26,7 @@ Everything installs under the directory the script lives in — fully relocatabl
 | `stop` | Stops ComfyUI (systemd service or foreground process). |
 | `update [--torch] [--rollback]` | Self-updates spark-comfyui itself first (git fast-forward, only when this repo has newer commits), then updates ComfyUI + dependencies; rebuilds SageAttention only when needed; repairs anything shadowed; ends with a clear summary. `--torch` upgrades PyTorch (forces a Sage rebuild). `--rollback` returns to the pre-update revision. |
 | `doctor` | Full health check. Verifies every optimization is present **and active**, and diagnoses the GB10 silent-drift traps: shadowed torch/SageAttention/onnxruntime, silent attention fallbacks, dead quantization (NVFP4) backend, stale toolchain, swap, stuck clocks. Every failure names its fix. |
-| `status [--watch [SEC]]` | One-page glance: process, GPU temp/power/memory, versions, branch, config. `--watch` opens a live dashboard (every 5s or `SEC`): heat-colored sparklines with min–max/avg for temp, power, SM clock, GPU util, unified RAM, CPU, disk I/O — and quiet-when-healthy rows that appear only when they have a story: throttle flags (HW/thermal-slowdown bits), swap, **who holds the unified pool** (co-resident LLMs show up here) and per-generation telemetry from ComfyUI's own API. Every sample lands in `thermal_monitor.log` — post-mortem evidence for silent hard-reboots. |
+| `status [--watch [SEC]]` | One-page glance: process, GPU temp/power/memory, versions, branch, config. `--watch` opens a live dashboard (every 5s or `SEC`): heat-colored sparkline timeseries for GPU/memory/system health, quiet-when-healthy rows (throttle flags, swap, generation telemetry from ComfyUI's own API) that appear only when they have a story, and a **`session:` summary made for A/B testing** — gen count, first vs steady duration, mean it/s. Every sample lands in `thermal_monitor.log` (incl. per-process GPU memory — co-resident LLMs show up there): post-mortem evidence for silent hard-reboots. |
 | `tune [--clock-cap MHZ] [--persist]` | System stability: disables swap, sets GPU persistence mode, optional clock cap. `--persist` makes it survive reboots via systemd. |
 | `service` | Installs and starts a systemd user service (auto-start, restart-on-failure, survives logout). |
 
@@ -139,42 +139,40 @@ $ ./spark-comfyui.sh doctor
   No silent-drift issues detected.
 ```
 
-`status --watch` mid-generation — **every line is a timeseries**, heat-colored by value (power is red here: ~92W sustained is exactly the overcurrent-reboot zone on affected units). The dashboard is *quiet when healthy*: throttle flags, swap, co-resident pool holders and generation telemetry only get a row when there's something to say — and each row arrives with its window history intact, since sampling never stops. The PROCESSES section tracks *who holds the unified pool* over time — a co-resident vLLM stops being a mystery slowdown and becomes a sparkline — plus generation telemetry straight from ComfyUI's own API: `gen` duration history (in-flight one ticking in the margin), live sampling speed (`it/s` — a drop mid-window means throttling or background load), `latency` from queue submission to saved output, queue depth, and the node-cache `hit rate` (high = repeat jobs are properly reusing prompt embeds and loaded models). Every sample also lands in `thermal_monitor.log` so the trail survives a hard reboot:
+`status --watch` during a run. **Every line is a timeseries**, heat-colored by value, and the dashboard is *quiet when healthy*: throttle flags, swap and generation telemetry only get a row when there's something to say — each arriving with its window history intact, since sampling never stops.
+
+The GENERATION section (its header names the attention backend) comes straight from ComfyUI's own API: `gen` duration history with the in-flight one ticking in the margin, live sampling speed (`it/s` — a drop mid-window means throttling or background load), `latency` from queue submission to saved output, queue depth, and the node-cache `hit rate` (high = repeat jobs are properly reusing prompt embeds and loaded models). Every sample also lands in `thermal_monitor.log` so the trail survives a hard reboot:
 
 ```console
-$ ./spark-comfyui.sh status --watch 2
-spark-comfyui v2026.07.15 — sparky · driver 580.159.03 — every 2s, window 72s — Ctrl-C stops
+$ ./spark-comfyui.sh status --watch 3
+spark-comfyui v2026.07.15.1 — sparky · driver 580.159.03 — every 3s, window 105s — Ctrl-C stops
 log: /home/user/spark-comfyui/thermal_monitor.log
 
   ─ GPU ──────────────────────────────────────────────────────────────────────
-  temp         71°C ↗                   ▁▁▃▂▃▃▃▂▅▆▅▆▆▆▇▇██  65–71 ~68
-  power      92.40W ↗                   ▇█▇▆▅▆▅▄▅▄▅▅▃▂▁▁▂▃  92.15–93.25 ~92.68
-  sm clk    2307MHz ↘                   ▄█▄▄▄▇▆▄▄▆▃▂▃▃▃▂▁▂  2301–2340 ~2318 P0
-  gpu           96%                     ▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅  96–96 ~96
+  temp         57°C ↗                   ▁▁▁▃▅▅▅▁▁▁▅▆▆▆▁▁▁▁▅▅▆█▃▁▁  46–61 ~53
+  power      77.40W ↗                   ▁▁▁▇███▁▁▁████▁▁▁▁███▅▁▁▁  10.4–77.4 ~32.5
+  sm clk    2411MHz                     ▂▂▅█▆▆▆▂▂▂▆▅▅▅▂▂▂▂▅▅▅▅▂▂▂  2398–2463 ~2421 P0
+  gpu           96%                     ▁▁▄▇███▁▁▁████▁▁▁▁████▁▁▁  0–96 ~33.6
   ─ SYSTEM ───────────────────────────────────────────────────────────────────
-  unified     52.3G                     ▁▁▂▃▅▇████████████  23.9–52.4 ~48.1 of 122G
-  cpu            6%                      ▁▁▁▁▁▁▁▁▁▁█▁▁▁▁▁▁  6–7 ~6.1
-  disk io   0.0MB/s                      █▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁  0–412 ~28.2
-  ─ PROCESSES · ComfyUI pid 12345 [SageAttention] ────────────────────────────
-  rss          2.5G                     ▅▅▅▅▅▅▆▆▆▆▆▆▆▆▆▆▆▆  2.1–2.5 ~2.4
-  gpu self    28.4G                     ▁▁▂▃▅▇████████████  8.2–28.4 ~24.6
-  co-res      21.0G                     ▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅  21–21 ~21 VLLM::EngineCore
-  gen         13.2s ↘                   ██████▇▇▇▇▇▇▆▆▆▆▆▆  13.2–14.8 ~13.9 at 21:24:05 · now 8s…
-  it/s         0.68                        ▁▁▁█▁▁  ▁▁▁▁▁▁   0.67–0.77 ~0.69
-  latency       14s                        ▁▁▁▁▁▁▁▁▁██████  13–14 ~13.6
-  queue           1                     ▁▁▁██████▁▁▁▁▁████  0–1 ~0.35
-  hit rate      67%                     ▁▁▁▁▁▁██████████▅▅  0–67 ~59
+  unified     22.7G                     ▁▁▃██████████████████████  4.1–23.6 ~20.9 of 122G
+  cpu            5%                      ▁▃█▅▆▅▃▁▁▄▅▅▅▂▁▁▁▅▅▅▆▁▁▁  1–10 ~3.1
+  disk io   0.0MB/s                      ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█▁▁▁▁▁▁█▁  0–0.4 ~0.04
+  ─ GENERATION · SageAttention ───────────────────────────────────────────────
+  gen         12.6s                             ███████▁▁▁▁▁▁▁▁▁▁  12.5–15.6 ~13.4 at 07:52:43
+  it/s         0.79                         ▁▃▃▄   █▃▃▄    █▃▃     0.4–1.36 ~0.79
+  latency       10s                             ███████▅▅▅▅▅▅▅▁▁▁  10–16 ~12.3
+  queue           0                     ▁▁▁█████▁▁▁████▁▁▁▁███▁▁▁  0–1 ~0.34
+  hit rate      67%                             ▁▁▁▁▁▁▁██████████  0–67 ~49.6
+  session: 3 gens · first 15.6s · steady ~12.6s (12.5–12.6) · ~0.79 it/s
 
-  samples: 214 · elapsed: 7m08s
+  samples: 35 · elapsed: 1m49s
 ```
 
-Idle and healthy, the same dashboard is nine rows — everything else has to earn its line (throttle only after a real slowdown flag, swap only if it exists, co-res only while someone holds the pool, gen telemetry only with data — each arriving with its window history intact, since sampling never stops):
+The `session:` line is built for **A/B testing**. It aggregates every gen that finished under this watch: `first` carries the model-load cost, `steady` (with min–max) excludes it, plus the session-mean sampling rate and an error count if any. Stats reset each launch and gens that predate the watch never count — so run one watch per condition (a flag, a clock cap, a co-resident LLM…) and compare the two lines.
+
+Idle and healthy, the same dashboard is seven rows — everything else has to earn its line (throttle only after a real slowdown flag, swap only if it exists, gen telemetry only with data):
 
 ```console
-$ ./spark-comfyui.sh status --watch
-spark-comfyui v2026.07.15 — sparky · driver 580.159.03 — every 5s, window 180s — Ctrl-C stops
-log: /home/user/spark-comfyui/thermal_monitor.log
-
   ─ GPU ──────────────────────────────────────────────────────────────────────
   temp         41°C                     ▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅  41–41 ~41
   power       4.07W ↘                   ▂▂▁▂▁█▇▂▁▁▂▁▂▂▁▂▁▁  4.03–4.32 ~4.09
@@ -184,9 +182,7 @@ log: /home/user/spark-comfyui/thermal_monitor.log
   unified      4.1G                     ▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅  4.1–4.1 ~4.1 of 122G
   cpu            1%                     ▁▁▁▁█▁▁▁▁▁▁▁▁▁▁▁▁▁  0–6 ~1.2
   disk io   0.0MB/s                     ▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅  0–0 ~0
-  ─ PROCESSES · ComfyUI pid 12345 [SageAttention] ────────────────────────────
-  rss          1.1G                     ▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅  1.1–1.1 ~1.1
-  gpu self     0.2G                     ▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅  0.2–0.2 ~0.2
+  ─ GENERATION · SageAttention ───────────────────────────────────────────────
 
   samples: 36 · elapsed: 3m00s
 ```

@@ -18,74 +18,20 @@ self-healing.
 
 Author/owner: GitHub `bjarkebolding`. Target repo name: `spark-comfyui`.
 Hardware in use: DGX Spark, hostname `sparky`, install root `~/comfyui-spark/`.
-Current version: **2026.07.15** (MIT licensed, shellcheck-clean).
-Versioning is **CalVer** as of 2026-07-13: `YYYY.MM.DD`, plus `.N` for a
-second behavior-changing release the same day. Semver was dropped because
-push cadence made it meaningless (pushing to main IS releasing); a version's
-only job here is to stamp which behavior state a bug report ran. The
+Published: https://github.com/bjarkebolding/spark-comfyui.
+Current version: **2026.07.15.1** (MIT licensed, shellcheck-clean).
+
+## Versioning & releasing
+
+CalVer as of 2026-07-13: `YYYY.MM.DD`, plus `.N` for a second
+behavior-changing release the same day. Semver was dropped because push
+cadence made it meaningless (pushing to main IS releasing); a version's only
+job here is to stamp which behavior state a bug report ran. The
 `1.4.0 → 2026.x` transition sorts correctly under `sort -V`, and `doctor`'s
 update probe is git-ancestry-based, so the format is cosmetic to tooling.
-Published: https://github.com/bjarkebolding/spark-comfyui (v1.0.0 2026-07-10,
-v1.1.0 same day — backup-revert bug fix, runtime-fallback + stuck-clock
-doctor checks, TRITON_PTXAS_PATH, mod-state allowlist; v1.2.0 2026-07-11 —
-NVFP4 live doctor gate, self-updating `update`; v1.3.0 same day — version
-banner on every invocation, doctor self-version + update-pending probe,
-status version line; v1.4.0 2026-07-13 — `status --watch` live sparkline
-dashboard: temp/power/SM-clock/util/unified-RAM/CPU timeseries with min–max
-ranges, optional interval arg, dated log lines, python-not-wrapper pid/RSS
-detection, plain-line fallback when stdout isn't a tty — the durable
-thermal_monitor.log evidence trail is unchanged in purpose; 2026.07.13.1
-same day — switch to CalVer, no functional change; 2026.07.14 — status
---watch v2: sectioned dashboard (GPU / unified memory / system / processes),
-per-glyph heat-colored sparklines (green/yellow/red by absolute thresholds:
-temp 70/80, power 60/80 — red power IS the overcurrent zone), trend arrows,
-min–max~avg stats, terminal-width-adaptive window; new telemetry: P-state +
-decoded clock-event flags (sw-power-cap is benign/constant on GB10, the four
-HW/thermal-slowdown bits render red), page cache, load avg, disk I/O rate
-from /proc/diskstats, per-process GPU memory via query-compute-apps —
-co-resident vLLM becomes its own sparkline — and generation telemetry from
-ComfyUI's own stock API via _watch_comfy (one python call per tick hits
-/history, /queue, /internal/logs/raw): gen duration + in-flight elapsed (an
-errored gen is labeled; a gen in flight at crash time is the overcurrent
-smoking gun), live it/s (newest tqdm rate in the server's terminal ring
-buffer, only while in flight — per-step progress_state ws events are NOT
-passively observable, they only go to the owning client), true
-submission→saved latency (the watch timestamps queue ids on first sight;
-latency must be computed BEFORE the seen[] prune, see code comment), queue
-depth, and node-cache hit rate (execution_cached nodes vs the prompt's
-node count); EVERY dashboard line is a timeseries row (pstate,
-throttle-bit count, swap, ComfyUI rss, ComfyUI gpu mem, co-resident gpu
-mem, gen, it/s, latency, queue, hit rate — process identity lives in the
-PROCESSES section header, one-off facts ride in each row's trailing extra
-slot); log line gained CACHE/LOAD/IO/RSS/CGPU/OGPU/PST/EVT/GEN/ACT/ITS/
-LAT/Q/HIT fields; field-verified end-to-end with live Krea-2 gens (hit
-rate 67% = 6/9 nodes cached on repeat submission); the static
-overcurrent hint lines were dropped from the dashboard (the README
-troubleshooting section carries that knowledge now); utilization.memory was
-probed and DROPPED — the counter reads constant 0 on GB10 even at 90 W, a
-dead gauge in a forensic log misleads); 2026.07.15 — status --watch
-declutter, "quiet when healthy" applied to the dashboard itself: rows whose
-healthy state is a flat 0/n-a line render only when they have a story —
-throttle (any slowdown bit in the window), swap (only if swap exists at
-all), co-res (only while another process holds the pool), gen/it-s/latency/
-queue/hit-rate (only with data), rss/gpu-self (only while ComfyUI runs; the
-PROCESSES header alone says "not running") — via `_series_nonzero`/
-`_series_any` helpers (NB the bash gotcha that forced them:
-`${arr[*]//pat/}` substitutes per-element and re-adds the joining spaces,
-so it is never empty — join to a scalar first); pstate lost its dedicated
-row (P0 all gen, P8 idle duplicated the sm-clk story) and now rides the
-sm-clk row's extra slot; the benign sw-power-cap tag, page-cache and
-load-1m rows were cut from the dashboard entirely; UNIFIED MEMORY + SYSTEM
-merged into one SYSTEM section (row renamed used→unified). Idle healthy
-dashboard = 9 rows. Ring buffers for hidden rows still advance every tick,
-so a row appears with its window history intact, and the append-only log
-line is UNCHANGED — still carries every field unconditionally (the log is
-the forensic record; the dashboard is just the live view). Also reconfirmed:
-_watch_comfy is HTTP polling by design, NOT the websocket — /ws would not
-show other clients' per-step progress anyway (owning-client-only, see
-2026.07.14 notes). NOTE: self-update pulls
-main HEAD, so pushing to main IS releasing — always bump VERSION in the
-same push.
+
+**Self-update pulls main HEAD, so pushing to main IS releasing — always bump
+VERSION in the same push.** Docs-only pushes need no bump.
 
 ## Golden rules (do not regress these)
 
@@ -107,7 +53,9 @@ same push.
 5. **Fail loud on real problems, quiet when healthy.** No silent degradation.
    But don't cry wolf: benign platform noise (e.g. the aarch64
    `nvidia-*-cu13 is not supported on this platform` line from `pip check`) is
-   filtered, not surfaced as a failure.
+   filtered, not surfaced as a failure. This rule governs the `--watch`
+   dashboard too: rows render only when they have a story (see the watch
+   section below).
 6. **Test patches against fixtures before shipping.** Source patches edit
    upstream Python; always dry-run the transform on a realistic fixture and
    confirm the result still `ast.parse`s.
@@ -116,7 +64,7 @@ same push.
 
 ```
 spark-comfyui.sh          # THE entry point — vanilla install/run/update
-                          # lifecycle + dispatch; ~1100 lines. GB10 venv-
+                          # lifecycle + dispatch; ~1700 lines. GB10 venv-
                           # package logic (torch, SageAttention, onnx) lives
                           # in mods/_lib/mod_common.sh, not here.
 mods/                     # discovered, applied & self-healed automatically
@@ -237,6 +185,77 @@ Disable all mods, including the pre-run guard, with `SPARK_SOURCE_PATCHES=0`.
 Adding a source-patch mod = drop a new `mods/NN-name/` dir; no main-script
 edits needed. A venv-package mod needs its underlying logic added to
 `mod_common.sh` too if it doesn't already live there.
+
+## status --watch (second-biggest subsystem)
+
+Everything lives in `cmd_status` plus three helpers (`_watch_row`,
+`_watch_hdr`, `_watch_comfy`, `_series_nonzero`/`_series_any`). Design
+decisions below were argued out and field-verified — don't re-derive them.
+
+**Two outputs per tick, different jobs.** The append-only
+`thermal_monitor.log` line is the actual point: it survives the silent
+hard-reboots this exists to diagnose, and it carries **every field
+unconditionally** (`GPU PWR SM UTIL RAM SWAP CPU CACHE LOAD IO RSS CGPU OGPU
+PST EVT GEN ACT ITS LAT Q HIT`). The dashboard is just the live tty view of
+the same samples — when stdout isn't a tty, plain log lines are emitted
+instead. Some fields are log-only by design (RSS, CGPU/OGPU per-process GPU
+split, CACHE, LOAD, raw EVT hex): they matter in a post-mortem, not on
+screen.
+
+**Quiet-when-healthy rendering** (golden rule 5 applied to the dashboard):
+always-on rows are GPU temp/power/sm-clk/util, unified memory, CPU, disk I/O
+— seven rows idle. Conditional rows render only with a story: `throttle`
+(any slowdown bit in the window), `swap` (only if swap exists at all),
+`gen`/`it/s`/`latency`/`queue`/`hit rate` (only with data). Ring buffers
+always advance, so a row appears with its window history intact. Visibility
+tests use `_series_nonzero`/`_series_any` — they exist because of a bash
+gotcha: `${arr[*]//pat/}` substitutes per-element and re-adds the joining
+spaces, so it can never yield an empty string; join to a scalar first.
+
+**Renderer** (`_watch_row`, one awk per row): per-glyph heat colors by
+absolute thresholds — temp 70/80, power 60/80 (red power IS the GB10
+overcurrent zone), unified memory 85%/95% of the pool; unthresholded rows
+render in one accent color. Trend arrows are dead-banded to 5% of the window
+span. Colors wrap the *padded* value text so escape bytes never skew
+columns; bar glyphs are split into an awk array (not substr) for mawk/gawk
+parity. Section rules use `sed`, not `tr` (tr is byte-oriented and shreds
+the multibyte `─`). The window width adapts to the terminal.
+
+**Generation telemetry** (`_watch_comfy`, one python call per tick) polls
+three stock HTTP endpoints: `/history`, `/queue`, `/internal/logs/raw`.
+HTTP polling is BY DESIGN, not a websocket: per-step `progress_state` ws
+events go only to the prompt's owning client (`comfy_execution/progress.py`)
+— a passive `/ws` listener would never see other clients' step progress.
+Live `it/s` is the newest tqdm rate scraped from the server's terminal ring
+buffer, only while a prompt is in flight; `hit rate` = nodes in the
+`execution_cached` message vs the prompt's node count; an errored gen is
+labeled, and a gen in flight at crash time is the overcurrent smoking gun.
+
+**Latency** (submission→saved): the loop timestamps queue ids on first
+sight; when one finishes, latency = now − first-seen. The latency check
+MUST run before the seen[] populate/prune — on the very tick a gen finishes
+the queue is already empty and idle, and pruning first would wipe the
+timestamp. Only covers jobs submitted while the watch runs.
+
+**Session A/B summary** (the `session:` line): every gen that finishes
+while the watch runs is recorded exactly once via fin_id-change accounting;
+whatever fin_id says on the FIRST tick is only a baseline, so history
+predating the watch never skews a bench. Distilled to `N gens · first Xs ·
+steady ~Ys (lo–hi) · ~Z it/s · E errored` — first carries the model load,
+steady excludes it, mirroring the 2026-07-13 bench methodology. Stats reset
+per launch: one watch session per A/B condition = one comparable line. The
+GENERATION section header names the attention backend (SageAttention/SDPA),
+the classic A/B dimension.
+
+**Dead/dropped gauges — don't re-add:** `utilization.memory` reads a
+constant 0 on GB10 even at 90 W (probed 2026-07-14; a dead gauge in a
+forensic log misleads). `sw-power-cap` (0x4) is benign/constant on GB10
+even at idle — only the four HW/thermal-slowdown bits (0x08/0x20/0x40/0x80)
+alarm; the raw hex stays in the log's EVT field. A dedicated pstate row
+duplicated the sm-clk story (P0 generating, P8 idle) — it's a tag on the
+sm-clk row now. GB10 nvidia-smi N/A fields: `clocks.mem`, `fan.speed`,
+`temperature.memory`, `power.limit` (and `nvidia-smi -pl` doesn't work —
+hence `tune --clock-cap`).
 
 ## GB10 domain knowledge (hard-won; don't relitigate)
 
@@ -365,10 +384,11 @@ transform on a fixture and `ast.parse` the result first.
   confirmed live via `comfy_kitchen.list_backends()`: `cuda` backend
   `available: True` with `quantize_nvfp4`/`scaled_mm_nvfp4` etc. in its
   capabilities — and since 2026-07-11 enforced by a real forced-kernel gate
-  in `doctor` (`kitchen_nvfp4_ok`), not just the registry listing. One lever we deliberately don't touch: `--enable-triton-backend`
-  (off by default in `comfy/quant_ops.py`, not passed by `cmd_run`) would
-  additionally enable Kitchen's Triton backend as a third NVFP4 path —
-  unevaluated on GB10, don't adopt without a field test.
+  in `doctor` (`kitchen_nvfp4_ok`), not just the registry listing. One lever
+  we deliberately don't touch: `--enable-triton-backend` (off by default in
+  `comfy/quant_ops.py`, not passed by `cmd_run`) would additionally enable
+  Kitchen's Triton backend as a third NVFP4 path — unevaluated on GB10,
+  don't adopt without a field test.
 - Possible future mod candidates from community forums (evaluate, don't adopt
   blindly): SageAttention 3 (mosaic artifacts on Spark — as of the 2026-07
   research round this is now corroborated in SageAttention's own tracker:
@@ -401,14 +421,40 @@ transform on a fixture and `ast.parse` the result first.
 - Consider a GitHub issue template that asks for `spark-comfyui.sh doctor`
   output — for this project that one command is nearly a complete bug report.
 
-## Release checklist (v1.0.0 shipped 2026-07-10; repeat per release)
+## Release history (one line per release; details live in the GitHub Releases)
+
+- **v1.0.0** (2026-07-10) — first public release.
+- **v1.1.0** (2026-07-10) — backup-revert bug fix; runtime-fallback +
+  stuck-clock doctor checks; `TRITON_PTXAS_PATH`; mod-state allowlist.
+- **v1.2.0** (2026-07-11) — NVFP4 live doctor gate; self-updating `update`.
+- **v1.3.0** (2026-07-11) — version banner on every invocation; doctor
+  self-version + update-pending probe; status version line.
+- **v1.4.0** (2026-07-13) — first `status --watch` sparkline dashboard
+  (temp/power/clock/util/RAM/CPU, interval arg, dated log lines,
+  python-not-wrapper pid detection, plain-line fallback when not a tty).
+- **2026.07.13.1** (2026-07-13) — switch to CalVer; no functional change.
+- **2026.07.14** — watch v2: sectioned dashboard, per-glyph heat colors,
+  trend arrows, adaptive window; added P-state + decoded clock-event flags,
+  page cache, load, disk I/O, per-process GPU memory, and generation
+  telemetry (`_watch_comfy`); log line gained CACHE…HIT fields; probed and
+  dropped `utilization.memory` (dead on GB10); dropped the static
+  overcurrent hint lines (README troubleshooting carries that now).
+- **2026.07.15** — watch declutter: quiet-when-healthy conditional rows,
+  pstate folded into sm-clk, page-cache/load-1m rows cut, UNIFIED MEMORY +
+  SYSTEM sections merged; added `_series_nonzero`/`_series_any`.
+- **2026.07.15.1** — PROCESSES section replaced by GENERATION (header names
+  the attention backend) + the per-session A/B `session:` summary line;
+  rss/gpu-self/co-res became log-only. Field-verified with 3 live Krea-2
+  gens (first 15.6s, steady ~12.6s; pre-watch gens correctly not counted).
+
+## Release checklist (repeat per release)
 
 1. `chmod +x spark-comfyui.sh` stays committed (mode bit `100755` in the index).
 2. `git add spark-comfyui.sh mods/ README.md LICENSE .gitignore CLAUDE.md`
 3. Set `VERSION=` in spark-comfyui.sh to today's date, `YYYY.MM.DD`
    zero-padded (append `.N` if a behavior-changing release already went out
-   today). Also update the header comment and the "Current version" line
-   above. Tag `v<VERSION>` to match `--version`.
+   today). Also update the header comment, the "Current version" line above,
+   and add a Release-history line. Tag `v<VERSION>` to match `--version`.
 4. README clone URL already set to `github.com/bjarkebolding/spark-comfyui`.
    The version strings inside README console captures are illustrative —
    refresh them when a capture is retaken, not on every release.
