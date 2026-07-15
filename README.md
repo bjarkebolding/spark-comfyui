@@ -168,7 +168,28 @@ log: /home/user/spark-comfyui/thermal_monitor.log
   samples: 214 · elapsed: 7m08s
 ```
 
-Idle and healthy, the same dashboard is nine rows: GPU temp/power/clock/util, unified memory, CPU, disk I/O, and ComfyUI's rss + GPU memory. Everything else has to earn its line.
+Idle and healthy, the same dashboard is nine rows — everything else has to earn its line (throttle only after a real slowdown flag, swap only if it exists, co-res only while someone holds the pool, gen telemetry only with data — each arriving with its window history intact, since sampling never stops):
+
+```console
+$ ./spark-comfyui.sh status --watch
+spark-comfyui v2026.07.15 — sparky · driver 580.159.03 — every 5s, window 180s — Ctrl-C stops
+log: /home/user/spark-comfyui/thermal_monitor.log
+
+  ─ GPU ──────────────────────────────────────────────────────────────────────
+  temp         41°C                     ▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅  41–41 ~41
+  power       4.07W ↘                   ▂▂▁▂▁█▇▂▁▁▂▁▂▂▁▂▁▁  4.03–4.32 ~4.09
+  sm clk     208MHz                     ▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅  208–208 ~208 P8
+  gpu            0%                     ▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅  0–0 ~0
+  ─ SYSTEM ───────────────────────────────────────────────────────────────────
+  unified      4.1G                     ▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅  4.1–4.1 ~4.1 of 122G
+  cpu            1%                     ▁▁▁▁█▁▁▁▁▁▁▁▁▁▁▁▁▁  0–6 ~1.2
+  disk io   0.0MB/s                     ▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅  0–0 ~0
+  ─ PROCESSES · ComfyUI pid 12345 [SageAttention] ────────────────────────────
+  rss          1.1G                     ▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅  1.1–1.1 ~1.1
+  gpu self     0.2G                     ▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅  0.2–0.2 ~0.2
+
+  samples: 36 · elapsed: 3m00s
+```
 
 ## Patch list (optional)
 
