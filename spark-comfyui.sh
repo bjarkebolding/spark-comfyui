@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.07.14 | License: MIT
+#  Version 2026.07.15 | License: MIT
 # =============================================================================
 #  One script for the whole lifecycle, tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory.
@@ -53,7 +53,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.07.14"
+VERSION="2026.07.15"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -856,6 +856,13 @@ _watch_row() {
   }'
 }
 
+# Row-visibility tests for the sample series (passed as "${h_x[@]}"; "$*"
+# joins to a scalar first — ${arr[*]//pat/} substitutes per-element and
+# re-adds the joining spaces, so it can never yield an empty string).
+# _series_nonzero: any real nonzero sample. _series_any: any sample at all.
+_series_nonzero() { local j="$*"; [[ -n "${j//[ .0-]/}" ]]; }
+_series_any()     { local j="$*"; [[ -n "${j//[ -]/}" ]]; }
+
 # A dim "─ NAME ────…" section rule, sized to the dashboard width.
 # (sed, not tr: tr is byte-oriented and would shred the multibyte ─ glyph.)
 _watch_hdr() {
@@ -962,19 +969,20 @@ cmd_status() {
     cols="$(tput cols 2>/dev/null || echo "${COLUMNS:-100}")"
     win=$(( cols - 44 )); (( win < 24 )) && win=24; (( win > 64 )) && win=64
     width=$(( win + 42 ))
-    local -a h_temp h_pwr h_clk h_util h_pst h_thr h_ram h_cache h_swap
-    local -a h_cpu h_load h_io h_rss h_gself h_gother h_gen h_its h_lat h_q h_hit
+    local -a h_temp h_pwr h_clk h_util h_thr h_ram h_swap
+    local -a h_cpu h_io h_rss h_gself h_gother h_gen h_its h_lat h_q h_hit
     # Pre-fill the ring buffers so the sparkline width is constant from tick 1.
     for ((i = 0; i < win; i++)); do
-      h_temp[i]='-' h_pwr[i]='-' h_clk[i]='-' h_util[i]='-' h_pst[i]='-'
-      h_thr[i]='-' h_ram[i]='-' h_cache[i]='-' h_swap[i]='-' h_cpu[i]='-'
-      h_load[i]='-' h_io[i]='-' h_rss[i]='-' h_gself[i]='-' h_gother[i]='-'
+      h_temp[i]='-' h_pwr[i]='-' h_clk[i]='-' h_util[i]='-'
+      h_thr[i]='-' h_ram[i]='-' h_swap[i]='-' h_cpu[i]='-'
+      h_io[i]='-' h_rss[i]='-' h_gself[i]='-' h_gother[i]='-'
       h_gen[i]='-' h_its[i]='-' h_lat[i]='-' h_q[i]='-' h_hit[i]='-'
     done
-    local gpu_csv t p c u pst pst_n thr evt evt_val mem_used mem_tot mem_cache
+    local gpu_csv t p c u pst thr evt evt_val mem_used mem_tot mem_cache
     local swap_used swap_tot cpu_pct load1 io_now io_rate now_ts prev_io='' prev_ts=''
-    local prev_idle=0 prev_tot=0 pid cand rss proc_hdr swap_disp
-    local gself gother bigname state_flags state_bad
+    local prev_idle=0 prev_tot=0 pid cand rss proc_hdr
+    local gself gother bigname state_bad
+    local -a lines
     local gen_s act_s gen_flag gen_fin gen_extra fin_id cache_hit qdepth its qids qid
     # Submission→saved latency: prompt ids are timestamped when first seen in
     # the queue; when one finishes, latency = now - first-seen. Only covers
@@ -984,9 +992,10 @@ cmd_status() {
     local last_lat='-' lat_done=''
     local BLD=$'\033[1m' DIM=$'\033[2m' RED=$'\033[31m' RST=$'\033[0m'
     # Probe once for the extended GPU fields (pstate, clock-event flags).
-    # Older drivers that reject them fall back to the minimal set — the state
-    # line then hides itself. (utilization.memory was evaluated and dropped:
-    # the counter reads a constant 0 on GB10 even at 90W full load.)
+    # Older drivers that reject them fall back to the minimal set — the
+    # P-state tag on the sm-clk row and the throttle row then never render.
+    # (utilization.memory was evaluated and dropped: the counter reads a
+    # constant 0 on GB10 even at 90W full load.)
     local qgpu="temperature.gpu,power.draw,clocks.sm,utilization.gpu"
     if nvidia-smi --query-gpu="$qgpu,pstate,clocks_event_reasons.active" \
          --format=csv,noheader,nounits >/dev/null 2>&1; then
@@ -1011,18 +1020,16 @@ cmd_status() {
       [[ "${pst:-}" =~ ^P[0-9]+$ ]] || pst='-'
       evt_val=0
       [[ "${evt:-}" =~ ^0x[0-9a-fA-F]+$ ]] && evt_val=$(( 16#${evt#0x} )) || evt='-'
-      # Benign vs serious clock-event flags: sw-power-cap (0x4) is normal on
-      # GB10 even at idle; the slowdown bits are the overcurrent/thermal story.
-      state_flags='' state_bad=''
-      (( evt_val & 0x04 ))  && state_flags+=' · sw-power-cap'
+      # Serious clock-event flags only. sw-power-cap (0x4) is benign/constant
+      # on GB10 even at idle, so it stays in the log's raw EVT hex but never
+      # in the dashboard; the slowdown bits are the overcurrent/thermal story.
+      state_bad=''
       (( evt_val & 0x08 ))  && state_bad+=' HW-SLOWDOWN'
       (( evt_val & 0x20 ))  && state_bad+=' SW-THERMAL'
       (( evt_val & 0x40 ))  && state_bad+=' HW-THERMAL'
       (( evt_val & 0x80 ))  && state_bad+=' HW-POWER-BRAKE'
-      # Numeric twins for the P-state / throttle rows: P8 -> 8, and the count
-      # of serious slowdown bits (0 = healthy; any spike is the forensic gold).
-      pst_n='-'; [[ "$pst" != '-' ]] && pst_n="${pst#P}"
-      thr='-';   [[ "$evt" != '-' ]] && thr="$(wc -w <<<"$state_bad")"
+      # Count of serious slowdown bits (0 = healthy; any spike is forensic gold)
+      thr='-'; [[ "$evt" != '-' ]] && thr="$(wc -w <<<"$state_bad")"
       read -r mem_used mem_tot mem_cache swap_used swap_tot <<<"$(awk '
         /^MemTotal:/ {mt=$2} /^MemAvailable:/ {ma=$2}
         /^Buffers:/ {bu=$2} /^Cached:/ {ca=$2}
@@ -1078,6 +1085,9 @@ cmd_status() {
           END { printf "%.1f\t%.1f\t%s", self, other, bigname }')"
       [[ -n "$gself" ]]  || gself='-'
       [[ -n "$gother" ]] || gother='-'
+      # No pid -> "ComfyUI's own allocation" is not a number, it's a non-fact
+      # (the awk above still prints 0.0 with zero compute apps resident).
+      [[ -n "$pid" ]] || gself='-'
       # Generation telemetry from ComfyUI's own API (see _watch_comfy). A gen
       # in flight at the moment of a silent reboot is the smoking gun the log
       # exists for, so the numbers go into the evidence line too.
@@ -1112,14 +1122,11 @@ cmd_status() {
       elif [[ "$act_s" == '-' ]]; then
         seen=()   # queue drained and idle: forget cancelled/stale ids
       fi
-      if [[ "$swap_tot" == "0" ]]; then swap_disp="disabled (good)"
-      else swap_disp="of ${swap_tot}G ${RED}ENABLED — run tune!${RST}"; fi
       h_temp=("${h_temp[@]:1}" "$t");        h_pwr=("${h_pwr[@]:1}" "$p")
       h_clk=("${h_clk[@]:1}" "$c");          h_util=("${h_util[@]:1}" "$u")
-      h_pst=("${h_pst[@]:1}" "$pst_n");      h_thr=("${h_thr[@]:1}" "$thr")
-      h_ram=("${h_ram[@]:1}" "$mem_used");   h_cache=("${h_cache[@]:1}" "$mem_cache")
+      h_thr=("${h_thr[@]:1}" "$thr");        h_ram=("${h_ram[@]:1}" "$mem_used")
       h_swap=("${h_swap[@]:1}" "$swap_used"); h_cpu=("${h_cpu[@]:1}" "$cpu_pct")
-      h_load=("${h_load[@]:1}" "$load1");    h_io=("${h_io[@]:1}" "$io_rate")
+      h_io=("${h_io[@]:1}" "$io_rate")
       h_rss=("${h_rss[@]:1}" "$rss");        h_gself=("${h_gself[@]:1}" "$gself")
       h_gother=("${h_gother[@]:1}" "$gother"); h_gen=("${h_gen[@]:1}" "$gen_s")
       h_its=("${h_its[@]:1}" "$its");        h_lat=("${h_lat[@]:1}" "$last_lat")
@@ -1132,39 +1139,61 @@ cmd_status() {
         "$gen_s" "$act_s" "$its" "$last_lat" "$qdepth" "$cache_hit" >>"$logfile"
 
       # ---- live view --------------------------------------------------------
+      # Quiet-when-healthy: rows whose healthy state is a flat line of zeros
+      # or n/a earn their spot only when they have a story — throttle after
+      # any slowdown bit in the window, swap only when it exists at all,
+      # co-res only while another process holds the pool, gen telemetry only
+      # with data (and the process rows only while ComfyUI runs; the section
+      # header already says "not running"). Ring buffers always advance, so
+      # a row appears with its window history intact. The log line is NOT
+      # conditional — it always carries every field.
       if (( tty )); then
         (( tick++ )) || true
-        printf '\033[H'
-        printf '%s\033[K\n' \
-          "${BLD}spark-comfyui v$VERSION${RST} — $(hostname)${drv:+ · driver $drv} — every ${interval}s, window $((win * interval))s — Ctrl-C stops" \
-          "${DIM}log: $logfile${RST}" \
-          "" \
-          "$(_watch_hdr "GPU" "$width")" \
-          "$(_watch_row "temp"     "$t"          "°C"  "${h_temp[*]}"  70 80)" \
-          "$(_watch_row "power"    "$p"          "W"   "${h_pwr[*]}"   60 80)" \
-          "$(_watch_row "sm clk"   "$c"          "MHz" "${h_clk[*]}")" \
-          "$(_watch_row "gpu"      "$u"          "%"   "${h_util[*]}")" \
-          "$(_watch_row "pstate"   "$pst"        ""    "${h_pst[*]}"   "" "" "${state_flags# · }")" \
-          "$(_watch_row "throttle" "$thr"        ""    "${h_thr[*]}"   1 1 "${state_bad# }")" \
-          "$(_watch_hdr "UNIFIED MEMORY" "$width")" \
-          "$(_watch_row "used"     "$mem_used"   "G"   "${h_ram[*]}"   "$mem_warn" "$mem_crit" "of ${mem_tot}G")" \
-          "$(_watch_row "cache"    "$mem_cache"  "G"   "${h_cache[*]}")" \
-          "$(_watch_row "swap"     "$swap_used"  "G"   "${h_swap[*]}"  0.1 1 "$swap_disp")" \
-          "$(_watch_hdr "SYSTEM" "$width")" \
-          "$(_watch_row "cpu"      "$cpu_pct"    "%"   "${h_cpu[*]}"   85 95)" \
-          "$(_watch_row "load 1m"  "$load1"      ""    "${h_load[*]}")" \
-          "$(_watch_row "disk io"  "$io_rate"    "MB/s" "${h_io[*]}")" \
-          "$(_watch_hdr "$proc_hdr" "$width")" \
-          "$(_watch_row "rss"      "$rss"        "G"   "${h_rss[*]}")" \
-          "$(_watch_row "gpu self" "$gself"      "G"   "${h_gself[*]}")" \
-          "$(_watch_row "co-res"   "$gother"     "G"   "${h_gother[*]}" "" "" "${bigname:0:18}")" \
-          "$(_watch_row "gen"      "$gen_s"      "s"   "${h_gen[*]}"   "" "" "$gen_extra")" \
-          "$(_watch_row "it/s"     "$its"        ""    "${h_its[*]}")" \
-          "$(_watch_row "latency"  "$last_lat"   "s"   "${h_lat[*]}")" \
-          "$(_watch_row "queue"    "$qdepth"     ""    "${h_q[*]}")" \
-          "$(_watch_row "hit rate" "$cache_hit"  "%"   "${h_hit[*]}")" \
-          "" \
+        lines=(
+          "${BLD}spark-comfyui v$VERSION${RST} — $(hostname)${drv:+ · driver $drv} — every ${interval}s, window $((win * interval))s — Ctrl-C stops"
+          "${DIM}log: $logfile${RST}"
+          ""
+          "$(_watch_hdr "GPU" "$width")"
+          "$(_watch_row "temp"   "$t" "°C"  "${h_temp[*]}" 70 80)"
+          "$(_watch_row "power"  "$p" "W"   "${h_pwr[*]}"  60 80)"
+          "$(_watch_row "sm clk" "$c" "MHz" "${h_clk[*]}"  "" "" "${pst/#-/}")"
+          "$(_watch_row "gpu"    "$u" "%"   "${h_util[*]}")"
+        )
+        _series_nonzero "${h_thr[@]}" && lines+=(
+          "$(_watch_row "throttle" "$thr" "" "${h_thr[*]}" 1 1 "${state_bad# }")")
+        lines+=(
+          "$(_watch_hdr "SYSTEM" "$width")"
+          "$(_watch_row "unified" "$mem_used" "G" "${h_ram[*]}" "$mem_warn" "$mem_crit" "of ${mem_tot}G")"
+        )
+        [[ "$swap_tot" != "0" ]] && lines+=(
+          "$(_watch_row "swap" "$swap_used" "G" "${h_swap[*]}" 0.1 1 "of ${swap_tot}G ${RED}ENABLED — run tune!${RST}")")
+        lines+=(
+          "$(_watch_row "cpu"     "$cpu_pct" "%"    "${h_cpu[*]}" 85 95)"
+          "$(_watch_row "disk io" "$io_rate" "MB/s" "${h_io[*]}")"
+          "$(_watch_hdr "$proc_hdr" "$width")"
+        )
+        _series_any "${h_rss[@]}" && lines+=(
+          "$(_watch_row "rss" "$rss" "G" "${h_rss[*]}")")
+        _series_any "${h_gself[@]}" && lines+=(
+          "$(_watch_row "gpu self" "$gself" "G" "${h_gself[*]}")")
+        _series_nonzero "${h_gother[@]}" && lines+=(
+          "$(_watch_row "co-res" "$gother" "G" "${h_gother[*]}" "" "" "${bigname:0:18}")")
+        { _series_any "${h_gen[@]}" || [[ "$act_s" != '-' ]]; } && lines+=(
+          "$(_watch_row "gen" "$gen_s" "s" "${h_gen[*]}" "" "" "$gen_extra")")
+        _series_any "${h_its[@]}" && lines+=(
+          "$(_watch_row "it/s" "$its" "" "${h_its[*]}")")
+        _series_any "${h_lat[@]}" && lines+=(
+          "$(_watch_row "latency" "$last_lat" "s" "${h_lat[*]}")")
+        _series_nonzero "${h_q[@]}" && lines+=(
+          "$(_watch_row "queue" "$qdepth" "" "${h_q[*]}")")
+        _series_any "${h_hit[@]}" && lines+=(
+          "$(_watch_row "hit rate" "$cache_hit" "%" "${h_hit[*]}")")
+        lines+=(
+          ""
           "  ${DIM}samples: $tick · elapsed: $((SECONDS / 60))m$(printf '%02d' $((SECONDS % 60)))s${RST}"
+        )
+        printf '\033[H'
+        printf '%s\033[K\n' "${lines[@]}"
         printf '\033[J'
       else
         tail -1 "$logfile"

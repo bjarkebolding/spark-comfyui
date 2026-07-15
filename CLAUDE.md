@@ -18,7 +18,7 @@ self-healing.
 
 Author/owner: GitHub `bjarkebolding`. Target repo name: `spark-comfyui`.
 Hardware in use: DGX Spark, hostname `sparky`, install root `~/comfyui-spark/`.
-Current version: **2026.07.14** (MIT licensed, shellcheck-clean).
+Current version: **2026.07.15** (MIT licensed, shellcheck-clean).
 Versioning is **CalVer** as of 2026-07-13: `YYYY.MM.DD`, plus `.N` for a
 second behavior-changing release the same day. Semver was dropped because
 push cadence made it meaningless (pushing to main IS releasing); a version's
@@ -63,7 +63,27 @@ rate 67% = 6/9 nodes cached on repeat submission); the static
 overcurrent hint lines were dropped from the dashboard (the README
 troubleshooting section carries that knowledge now); utilization.memory was
 probed and DROPPED — the counter reads constant 0 on GB10 even at 90 W, a
-dead gauge in a forensic log misleads). NOTE: self-update pulls
+dead gauge in a forensic log misleads); 2026.07.15 — status --watch
+declutter, "quiet when healthy" applied to the dashboard itself: rows whose
+healthy state is a flat 0/n-a line render only when they have a story —
+throttle (any slowdown bit in the window), swap (only if swap exists at
+all), co-res (only while another process holds the pool), gen/it-s/latency/
+queue/hit-rate (only with data), rss/gpu-self (only while ComfyUI runs; the
+PROCESSES header alone says "not running") — via `_series_nonzero`/
+`_series_any` helpers (NB the bash gotcha that forced them:
+`${arr[*]//pat/}` substitutes per-element and re-adds the joining spaces,
+so it is never empty — join to a scalar first); pstate lost its dedicated
+row (P0 all gen, P8 idle duplicated the sm-clk story) and now rides the
+sm-clk row's extra slot; the benign sw-power-cap tag, page-cache and
+load-1m rows were cut from the dashboard entirely; UNIFIED MEMORY + SYSTEM
+merged into one SYSTEM section (row renamed used→unified). Idle healthy
+dashboard = 9 rows. Ring buffers for hidden rows still advance every tick,
+so a row appears with its window history intact, and the append-only log
+line is UNCHANGED — still carries every field unconditionally (the log is
+the forensic record; the dashboard is just the live view). Also reconfirmed:
+_watch_comfy is HTTP polling by design, NOT the websocket — /ws would not
+show other clients' per-step progress anyway (owning-client-only, see
+2026.07.14 notes). NOTE: self-update pulls
 main HEAD, so pushing to main IS releasing — always bump VERSION in the
 same push.
 
