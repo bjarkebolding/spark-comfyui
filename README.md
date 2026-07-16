@@ -28,6 +28,9 @@ Everything installs under the directory the script lives in. Fully relocatable, 
 | `doctor` | Full health check. Verifies every optimization is present **and active**, and diagnoses the GB10 silent-drift traps: shadowed torch/SageAttention/onnxruntime, silent attention fallbacks, dead quantization (NVFP4) backend, stale toolchain, swap, stuck clocks. Every failure names its fix. |
 | `status [--watch [SEC]]` | One-page glance: process, GPU temp/power/memory, versions, branch, config. `--watch` opens a live dashboard (every 5s or `SEC`): heat-colored sparkline timeseries for GPU, memory and system health, rows that appear only when they carry information (throttle flags, swap, generation telemetry from ComfyUI's own API), and a `session:` summary made for A/B testing (gen count, first vs steady duration, mean it/s). Every sample lands in `thermal_monitor.log`, including per-process GPU memory, so co-resident LLMs show up there. That log is the post-mortem evidence for silent hard-reboots. |
 | `tune [--clock-cap MHZ] [--persist]` | System stability: disables swap, sets GPU persistence mode, optional clock cap. `--persist` makes it survive reboots via systemd. |
+| `backup [--with-output] [FILE]` | Writes a small tgz of the hand-made state: workflows and settings, inputs, config files, the custom-node set (git nodes as pinned manifest entries, plain nodes copied whole), and a manifest of every model file. Models are never archived; a real backup was 3.7M against 74 GB of models. `--with-output` also archives generated images. Safe while ComfyUI runs. |
+| `restore FILE` | Rebuilds from a backup: installs first if ComfyUI is missing, merges user state back, re-clones custom nodes at their pinned commits, reruns the mod pass, then lists exactly which model files are missing and their sizes. Idempotent; restoring onto a healthy install reports everything present. |
+| `reset [--yes]` | Deletes and reinstalls ComfyUI, the venv and SageAttention (including the 10-30 min SageAttention build) while preserving models, workflows, settings, inputs, outputs and custom nodes. Asks you to type `reset` before touching anything; `--yes` skips the prompt. An interrupted reset resumes safely on rerun. |
 | `service` | Installs and starts a systemd user service (auto-start, restart-on-failure, survives logout). |
 
 `./spark-comfyui.sh help` prints the full reference; `--version` prints the version.
@@ -83,6 +86,7 @@ $ ./spark-comfyui.sh doctor
 
 == spark-comfyui (self) ==
   [info] git revision d6d7ab4
+  [info] Backup: spark-backup-20260716-074352.tgz (today)
   [info] up to date with the published repo
 
 == PyTorch / GPU (CPU-shadow check) ==
@@ -186,6 +190,59 @@ Idle and healthy, the dashboard is seven rows. Throttle renders only after a rea
 
   samples: 36 · elapsed: 3m00s
 ```
+
+## Backup, restore, reset
+
+These commands solve two problems: an install rots (a custom node wrecked the venv, doctor's fixes don't stick) and you want to rebuild it without losing your content, or you want to move everything to a fresh Spark. `reset` rebuilds in place. `backup` plus `restore` cover both, including the move.
+
+`backup` archives what took human effort: workflows and settings, inputs, config files, and the custom-node set (git nodes as pinned url+commit manifest entries, plain nodes copied whole). Models are manifested (path and size), never archived, which is why the archive stays small. Safe while ComfyUI is running:
+
+```console
+$ ./spark-comfyui.sh backup
+
+==> Staging backup
+
+==> Backup written
+  /home/user/spark-comfyui/backups/spark-backup-20260716-074352.tgz (3.7M)
+  models manifested, not archived — restore lists what to re-download
+```
+
+`restore` rebuilds from the archive: installs first if ComfyUI is missing, merges user state back, re-clones git custom nodes at their exact pinned commits, reruns the mod pass (so torch gets re-verified after node installs), then diffs the models manifest against disk and prints exactly which model files are missing and their sizes. Restoring onto a healthy install reports everything present:
+
+```console
+$ ./spark-comfyui.sh restore backups/spark-backup-20260716-074352.tgz
+
+==> Unpacking /home/user/spark-comfyui/backups/spark-backup-20260716-074352.tgz
+  format=1
+  version=2026.07.16
+  date=2026-07-16T07:43:52+02:00
+  host=sparky
+  comfyui_commit=87d23b81765161624889febfb3b81f19f3c8435b
+
+==> Stopping ComfyUI (restoring over its live user/config files)
+ComfyUI is not running
+
+==> Merging user state
+  merged user/
+  merged input/
+  restored comfyui-patches.list
+
+==> Restoring custom nodes
+  = comfyui-workflow-models-downloader (present)
+
+==> Applying mods (idempotent, self-healing)
+[... all six mods re-verify ...]
+
+==> Models check (against the archive's manifest)
+  all manifested models present
+
+==> Restore complete
+  Start ComfyUI:  ./spark-comfyui.sh run
+```
+
+Moving to a new Spark: clone spark-comfyui on the new machine, copy the backup archive over, rsync the models directory, run `restore`. `doctor` reports the newest backup and its age, so a stale backup shows up in every health check.
+
+`reset` is the in-place rebuild: it deletes ComfyUI, the venv and SageAttention, then reruns install (including the 10-30 min SageAttention build), while models, workflows, settings, inputs, outputs and custom nodes are held aside and moved back afterward (a same-filesystem move, instant even for 74 GB of models). It asks you to type the word `reset` before deleting anything; `--yes` skips the prompt (required when stdin is not a terminal). An interrupted reset resumes safely on rerun.
 
 ## Patch list (optional)
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.07.15.1 | License: MIT
+#  Version 2026.07.16 | License: MIT
 # =============================================================================
 #  One script for the whole lifecycle, tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory.
@@ -42,6 +42,20 @@
 #                              unified-memory freezes), persistence mode,
 #                              optional clock cap (~2100 fixes overcurrent
 #                              hard-reboots). --persist survives reboots.
+#    backup [--with-output] [FILE]
+#                              Archive the small precious state: workflows,
+#                              settings, inputs, patch list, custom-node list,
+#                              and a manifest of your models (listed, never
+#                              copied — they are huge). --with-output also
+#                              archives generated images. Safe while running.
+#    restore FILE              Rebuild from a backup archive: installs first
+#                              if needed, merges user state back, re-clones
+#                              custom nodes, and lists which models you still
+#                              need to fetch separately.
+#    reset [--yes]             Delete and reinstall ComfyUI, the venv and
+#                              SageAttention while keeping models, workflows,
+#                              inputs, outputs and custom nodes. The nuclear
+#                              option for when doctor's fixes don't stick.
 #    service                   Install + start a systemd user service.
 #
 #  Typical day: install once -> run -> update now and then.
@@ -53,7 +67,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.07.15.1"
+VERSION="2026.07.16"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -99,6 +113,11 @@ PATCH_BRANCH="spark-patched"
 # verified through a small contract (see mods/README.md). Toggle all mods
 # off with SPARK_SOURCE_PATCHES=0.
 MODS_DIR="${MODS_DIR:-$BASE_DIR/mods}"
+
+# User content inside the ComfyUI tree: what reset holds aside while it
+# wipes and reinstalls everything else. backup/restore cover the same set
+# (each entry with its own rules, so they don't loop over this list).
+readonly USER_CONTENT=(models user input output custom_nodes extra_model_paths.yaml)
 
 log()  { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m[warn] %s\033[0m\n' "$*"; }
@@ -329,7 +348,7 @@ _invoke_mod() {
       rm -f "$state_file"
       if [[ "$critical" == "1" ]]; then
         die "mod '$MOD_LAST_NAME' failed (critical) — see the output above for
-details. This step is required; fix the underlying issue and re-run: $0 $CMD"
+details. This step is required; fix the underlying issue and re-run: $0 ${CMD:-}"
       fi
       MOD_LAST_STATUS="skipped:error"
       return 0
@@ -341,7 +360,7 @@ details. This step is required; fix the underlying issue and re-run: $0 $CMD"
       rm -f "$state_file"
       if [[ "$critical" == "1" ]]; then
         die "mod '$MOD_LAST_NAME' failed (critical) — its output was suppressed
-(buffered mode). Fix the underlying issue, then re-run: $0 $CMD"
+(buffered mode). Fix the underlying issue, then re-run: $0 ${CMD:-}"
       fi
       MOD_LAST_STATUS="skipped:error"
       return 0
@@ -1309,6 +1328,323 @@ available after '$0 update' has moved ComfyUI forward at least once."
 
 
 # =============================================================================
+#  reset — regenerate everything, keep user content
+# =============================================================================
+# Nuke and reinstall ComfyUI/venv/SageAttention without touching the USER_CONTENT
+# content. User dirs are mv'd (same filesystem — instant even for 74 GB of
+# models) into a sibling hold area, the rest is wiped and reinstalled, then
+# the held dirs replace the fresh-from-git skeletons. A .phase marker in the
+# hold area makes an interrupted reset resumable: re-running converges.
+cmd_reset() {
+  local yes=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --yes) yes=1 ;;
+      *) die "Unknown reset option: $arg (use --yes to skip confirmation)" ;;
+    esac
+  done
+
+  local hold_dir phase="" d
+  hold_dir="$(dirname "$INSTALL_DIR")/.spark-reset-hold"
+  if [[ -d "$hold_dir" ]] \
+     && [[ -n "$(find "$hold_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+    [[ -f "$hold_dir/.phase" ]] && phase="$(cat "$hold_dir/.phase")"
+    log "Resuming an interrupted reset (hold area: $hold_dir${phase:+, phase: $phase})"
+  fi
+
+  log "Reset: regenerate the install, keep your content"
+  echo "  Deleted and reinstalled fresh:"
+  echo "    $INSTALL_DIR"
+  echo "    $VENV_DIR"
+  echo "    $SAGE_SRC"
+  echo "  Preserved (held aside during the reinstall):"
+  for d in "${USER_CONTENT[@]}"; do
+    echo "    $INSTALL_DIR/$d"
+  done
+  echo "  The reinstall includes the 10-30 min SageAttention build."
+  if [[ "$yes" -ne 1 ]]; then
+    [[ -t 0 ]] || die "stdin is not a terminal — pass --yes to confirm the reset"
+    local answer=""
+    printf "\nType 'reset' to continue: "
+    IFS= read -r answer || die "no confirmation received — nothing was changed"
+    [[ "$answer" == "reset" ]] || die "confirmation not given — nothing was changed"
+  fi
+
+  log "Stopping ComfyUI"
+  cmd_stop
+
+  if [[ "$phase" == "wiped" ]]; then
+    # Post-wipe resume: the destructive part already happened. A .git dir is
+    # no proof the interrupted install finished (clone is its first step, the
+    # SageAttention build its longest), so rerun cmd_install unconditionally:
+    # it is idempotent and skips or refreshes whatever did complete.
+    cmd_install
+  else
+    log "Holding user content aside in $hold_dir"
+    mkdir -p "$hold_dir"
+    for d in "${USER_CONTENT[@]}"; do
+      [[ -e "$INSTALL_DIR/$d" ]] || continue
+      # Never overwrite an existing hold entry: pre-wipe it is the user's
+      # data from an interrupted earlier reset, and guessing which of the
+      # two copies to keep is not this script's call.
+      if [[ -e "$hold_dir/$d" ]]; then
+        die "both $hold_dir/$d and $INSTALL_DIR/$d exist — refusing to guess
+which copy is yours. Inspect and merge them manually (the hold copy is from
+an interrupted earlier reset), then re-run: $0 reset"
+      fi
+      mv "$INSTALL_DIR/$d" "$hold_dir/"
+      echo "  held $d"
+    done
+    # Wipe guard: nothing user-precious may remain below INSTALL_DIR. This is
+    # the line between "reset" and "deleted the models after a failed mv".
+    for d in "${USER_CONTENT[@]}"; do
+      [[ -e "$INSTALL_DIR/$d" ]] && die "refusing to wipe: $INSTALL_DIR/$d still
+exists (the hold move did not complete). Inspect $hold_dir, then re-run: $0 reset"
+    done
+    log "Wiping $INSTALL_DIR, $VENV_DIR, $SAGE_SRC"
+    # The wipe may delete the caller's cwd (running reset from inside the
+    # install is natural); git/pip in cmd_install would then fail on getcwd.
+    cd "$BASE_DIR"
+    rm -rf "$INSTALL_DIR" "$VENV_DIR" "$SAGE_SRC"
+    echo wiped > "$hold_dir/.phase"
+    cmd_install
+  fi
+
+  log "Moving user content back into the fresh install"
+  for d in "${USER_CONTENT[@]}"; do
+    [[ -e "$hold_dir/$d" ]] || continue
+    rm -rf "${INSTALL_DIR:?}/$d"   # fresh-from-git skeleton loses to the user's copy
+    mv "$hold_dir/$d" "$INSTALL_DIR/"
+    echo "  restored $d"
+  done
+  # The held dirs carry stock git-tracked files from the old checkout
+  # (custom_nodes/websocket_image_save.py, models/configs/*, ...). Put those
+  # back at the fresh HEAD so the tree stays clean for update's ff-only
+  # merge; checkout -- never touches untracked user files.
+  for d in "${USER_CONTENT[@]}"; do
+    git -C "$INSTALL_DIR" checkout -q -- "$d" 2>/dev/null || true
+  done
+  rm -f "$hold_dir/.phase"
+  rmdir "$hold_dir"
+
+  log "Reset complete"
+  echo "  ComfyUI, the venv and SageAttention were reinstalled fresh;"
+  echo "  models, workflows, inputs, outputs and custom nodes were preserved."
+  echo "  Start ComfyUI:  $0 run"
+}
+
+# =============================================================================
+#  backup / restore — the small precious state, without the models
+# =============================================================================
+# The archive holds what took human effort (workflows, settings, inputs, the
+# custom-node set, config files) plus a manifest of the models — never the
+# model files themselves (74+ GB; restore prints what to re-download instead).
+# Safe to run while ComfyUI is serving.
+cmd_backup() {
+  local with_output=0 out=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --with-output) with_output=1; shift ;;
+      -*) die "Unknown backup option: $1 (use --with-output and/or FILE)" ;;
+      *)  [[ -z "$out" ]] || die "backup takes at most one FILE argument"
+          out="$1"; shift ;;
+    esac
+  done
+  [[ -d "$INSTALL_DIR/.git" ]] || die "no install at $INSTALL_DIR — run: $0 install"
+  if [[ -z "$out" ]]; then
+    mkdir -p "$BASE_DIR/backups"
+    out="$BASE_DIR/backups/spark-backup-$(date +%Y%m%d-%H%M%S).tgz"
+  fi
+  case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
+
+  log "Staging backup"
+  local stage; stage="$(mktemp -d)"
+  trap 'rm -rf "$stage"' EXIT
+  {
+    echo "format=1"
+    echo "version=$VERSION"
+    echo "date=$(date -Is)"
+    echo "host=$(hostname)"
+    echo "comfyui_commit=$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+  } > "$stage/meta"
+
+  [[ -f "$PATCH_LIST" ]] && cp -a "$PATCH_LIST" "$stage/comfyui-patches.list"
+  [[ -f "$INSTALL_DIR/extra_model_paths.yaml" ]] \
+    && cp -a "$INSTALL_DIR/extra_model_paths.yaml" "$stage/extra_model_paths.yaml"
+
+  # Custom nodes: git clones become manifest lines (url + commit, re-cloned on
+  # restore); non-git entries are copied whole. "User-installed" = not tracked
+  # by ComfyUI's own git (stock files like websocket_image_save.py are).
+  : > "$stage/custom-nodes.manifest"
+  local entry name url sha
+  if [[ -d "$INSTALL_DIR/custom_nodes" ]]; then
+    while IFS= read -r entry; do
+      name="$(basename "$entry")"
+      [[ "$name" == "__pycache__" ]] && continue
+      [[ -z "$(git -C "$INSTALL_DIR" ls-files "custom_nodes/$name" 2>/dev/null)" ]] || continue
+      if [[ -d "$entry/.git" ]]; then
+        url="$(git -C "$entry" remote get-url origin 2>/dev/null || echo unknown)"
+        sha="$(git -C "$entry" rev-parse HEAD 2>/dev/null || echo unknown)"
+        printf '%s\t%s\t%s\n' "$name" "$url" "$sha" >> "$stage/custom-nodes.manifest"
+      else
+        mkdir -p "$stage/custom_nodes_plain"
+        cp -a "$entry" "$stage/custom_nodes_plain/$name"
+      fi
+    done < <(find "$INSTALL_DIR/custom_nodes" -mindepth 1 -maxdepth 1 2>/dev/null)
+  fi
+
+  # Models are manifested (size + relative path), never copied.
+  if [[ -d "$INSTALL_DIR/models" ]]; then
+    find "$INSTALL_DIR/models" -type f -printf '%s\t%P\n' | sort -k2 > "$stage/models.manifest"
+  else
+    : > "$stage/models.manifest"
+  fi
+
+  # user/, input/ and output/ are tarred straight from the live tree (no
+  # staging copy of possibly-large dirs): tar excludes the logs and caches,
+  # --ignore-failed-read plus tolerating exit 1 (a file changed or vanished
+  # mid-read) is what makes "safe while ComfyUI is serving" true.
+  local members=(-C "$stage" meta models.manifest custom-nodes.manifest)
+  [[ -f "$stage/comfyui-patches.list" ]]   && members+=(comfyui-patches.list)
+  [[ -f "$stage/extra_model_paths.yaml" ]] && members+=(extra_model_paths.yaml)
+  [[ -d "$stage/custom_nodes_plain" ]]     && members+=(custom_nodes_plain)
+  members+=(-C "$INSTALL_DIR")
+  [[ -d "$INSTALL_DIR/user" ]] && members+=(user)
+  [[ -d "$INSTALL_DIR/input" ]] \
+    && [[ -n "$(find "$INSTALL_DIR/input" -mindepth 1 -print -quit)" ]] \
+    && members+=(input)
+  [[ "$with_output" -eq 1 && -d "$INSTALL_DIR/output" ]] && members+=(output)
+  local rc=0
+  tar -czf "$out" --exclude='__pycache__' --exclude='*.log' \
+    --ignore-failed-read "${members[@]}" || rc=$?
+  [[ "$rc" -le 1 ]] || die "tar failed (exit $rc) writing $out"
+  [[ "$rc" -eq 1 ]] && warn "some files changed while being archived (ComfyUI serving?) — they may be stale in this backup"
+  rm -rf "$stage"
+  trap - EXIT
+
+  log "Backup written"
+  echo "  $out ($(du -h "$out" | cut -f1))"
+  echo "  models manifested, not archived — restore lists what to re-download"
+}
+
+cmd_restore() {
+  local archive="${1:-}"
+  [[ -n "$archive" ]] || die "usage: $0 restore FILE"
+  [[ -f "$archive" && -r "$archive" ]] || die "cannot read backup archive: $archive"
+  case "$archive" in /*) ;; *) archive="$PWD/$archive" ;; esac
+
+  log "Unpacking $archive"
+  local stage; stage="$(mktemp -d)"
+  trap 'rm -rf "$stage"' EXIT
+  tar -xzf "$archive" -C "$stage"
+  grep -qx 'format=1' "$stage/meta" 2>/dev/null \
+    || die "not a spark-comfyui backup (meta lacks format=1): $archive"
+  sed 's/^/  /' "$stage/meta"
+
+  if [[ ! -d "$INSTALL_DIR/.git" ]]; then
+    log "No install at $INSTALL_DIR — installing first"
+    cmd_install
+  fi
+  activate_venv
+  log "Stopping ComfyUI (restoring over its live user/config files)"
+  cmd_stop
+
+  log "Merging user state"
+  local d
+  for d in user input output; do
+    [[ -d "$stage/$d" ]] || continue
+    mkdir -p "$INSTALL_DIR/$d"
+    cp -a "$stage/$d/." "$INSTALL_DIR/$d/"
+    echo "  merged $d/"
+  done
+  local src dst
+  for d in extra_model_paths.yaml comfyui-patches.list; do
+    src="$stage/$d"
+    [[ -f "$src" ]] || continue
+    case "$d" in
+      extra_model_paths.yaml) dst="$INSTALL_DIR/$d" ;;
+      comfyui-patches.list)   dst="$PATCH_LIST" ;;
+      *) continue ;;   # a list entry without a case arm must not reuse $dst
+    esac
+    if [[ -f "$dst" ]] && ! cmp -s "$src" "$dst"; then
+      cp -a "$dst" "$dst.bak"
+      warn "live $(basename "$dst") differed from the archive — saved aside as $(basename "$dst").bak"
+    fi
+    cp -a "$src" "$dst"
+    echo "  restored $(basename "$dst")"
+  done
+
+  log "Restoring custom nodes"
+  mkdir -p "$INSTALL_DIR/custom_nodes"
+  local entry name url sha ndir
+  if [[ -d "$stage/custom_nodes_plain" ]]; then
+    while IFS= read -r entry; do
+      name="$(basename "$entry")"
+      if [[ -e "$INSTALL_DIR/custom_nodes/$name" ]]; then
+        echo "  = $name (present)"
+      else
+        cp -a "$entry" "$INSTALL_DIR/custom_nodes/$name"
+        echo "  + $name (plain copy)"
+      fi
+    done < <(find "$stage/custom_nodes_plain" -mindepth 1 -maxdepth 1)
+  fi
+  if [[ -f "$stage/custom-nodes.manifest" ]]; then
+    while IFS=$'\t' read -r name url sha; do
+      [[ -n "$name" ]] || continue
+      ndir="$INSTALL_DIR/custom_nodes/$name"
+      if [[ -e "$ndir" ]]; then
+        echo "  = $name (present)"
+        continue
+      fi
+      echo "  + $name (cloning $url)"
+      # </dev/null: a prompting clone (ssh host key, credentials) must not
+      # eat the manifest lines this loop is reading from stdin.
+      if ! GIT_TERMINAL_PROMPT=0 git clone "$url" "$ndir" </dev/null; then
+        warn "could not clone $name from $url — skipped"
+        continue
+      fi
+      # Detached checkout of the archived commit; a miss (force-pushed
+      # upstream, shallow mirror) is a warning, not a failed restore.
+      if [[ -n "$sha" && "$sha" != "unknown" ]] \
+         && ! git -C "$ndir" checkout -q "$sha" 2>/dev/null; then
+        warn "$name: could not check out $sha — staying on clone HEAD"
+      fi
+      if [[ -f "$ndir/requirements.txt" ]]; then
+        pip install -r "$ndir/requirements.txt" </dev/null \
+          || warn "$name: pip install of its requirements failed — the node may not load"
+      fi
+    done < "$stage/custom-nodes.manifest"
+  fi
+
+  # Node pip installs can clobber torch (the classic GB10 trap) — the mods
+  # pass re-verifies and repairs, same as install/update. Idempotent.
+  apply_source_patches
+
+  log "Models check (against the archive's manifest)"
+  local missing_count=0 missing_bytes=0 size relpath
+  if [[ -f "$stage/models.manifest" ]]; then
+    while IFS=$'\t' read -r size relpath; do
+      [[ -n "$relpath" ]] || continue
+      [[ -f "$INSTALL_DIR/models/$relpath" ]] && continue
+      printf '  missing: %s (%s)\n' "$relpath" "$(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B")"
+      missing_count=$((missing_count + 1))
+      missing_bytes=$((missing_bytes + size))
+    done < "$stage/models.manifest"
+    if [[ "$missing_count" -gt 0 ]]; then
+      warn "$missing_count models missing, $(numfmt --to=iec "$missing_bytes" 2>/dev/null || echo "${missing_bytes}B"): download or rsync them separately"
+    else
+      echo "  all manifested models present"
+    fi
+  fi
+  rm -rf "$stage"
+  trap - EXIT
+
+  log "Restore complete"
+  echo "  Start ComfyUI:  $0 run"
+}
+
+
+# =============================================================================
 #  doctor — diagnose the silent-drift failure modes specific to GB10
 # =============================================================================
 #  These are the traps that pass a "successful install" but break at runtime.
@@ -1327,6 +1663,23 @@ cmd_doctor() {
     info "git revision $(git -C "$BASE_DIR" rev-parse --short HEAD 2>/dev/null)"
   else
     info "not a git clone — self-update unavailable"
+  fi
+  # Informational, not pass/fail: when the newest backup was taken. The -d
+  # gate covers the never-backed-up install; the || true covers a nonzero
+  # find/head pipeline status under pipefail. Both are load-bearing.
+  local newest_line="" newest_backup backup_age age_txt
+  [[ -d "$BASE_DIR/backups" ]] && newest_line="$(find "$BASE_DIR/backups" \
+    -maxdepth 1 -name 'spark-backup-*.tgz' -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn | head -1 || true)"
+  if [[ -n "$newest_line" ]]; then
+    newest_backup="${newest_line#* }"
+    backup_age=$(( ($(date +%s) - ${newest_line%%.*}) / 86400 ))
+    age_txt="$backup_age days old"
+    [[ "$backup_age" -eq 0 ]] && age_txt="today"
+    [[ "$backup_age" -eq 1 ]] && age_txt="1 day old"
+    info "Backup: $(basename "$newest_backup") ($age_txt)"
+  else
+    info "Backup: none in backups/ (run: $0 backup)"
   fi
   if [[ -d "$BASE_DIR/.git" ]] && timeout 5 git -C "$BASE_DIR" fetch -q origin 2>/dev/null; then
     local self_local self_up remote_ver
@@ -1680,6 +2033,9 @@ UNIT
 }
 
 # ------------------------------- Dispatch -----------------------------------
+# Sourced rather than executed (test harnesses source this file for its
+# function definitions): stop here, never dispatch.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
 CMD="${1:-}"
 shift || true
 # Banner on every invocation; --version excepted (kept one-line parseable).
@@ -1695,6 +2051,9 @@ case "$CMD" in
   doctor)   cmd_doctor ;;
   status)   cmd_status "$@" ;;
   tune)     cmd_tune "$@" ;;
+  backup)   cmd_backup "$@" ;;
+  restore)  cmd_restore "$@" ;;
+  reset)    cmd_reset "$@" ;;
   service)  cmd_service ;;
   # --- hidden backward-compat aliases (old command names still work) ---
   verify)   cmd_doctor ;;
@@ -1706,5 +2065,5 @@ real gains. A/B your actual workflow instead: time it, then
 re-time, and restore with: touch $SAGE_MARKER" ;;
   ""|-h|--help|help) usage ;;
   -v|--version|version) echo "spark-comfyui $VERSION" ;;
-  *) die "Unknown command: $CMD (try: install | run | stop | update | doctor | status | tune | service)" ;;
+  *) die "Unknown command: $CMD (try: install | run | stop | update | doctor | status | tune | backup | restore | reset | service)" ;;
 esac

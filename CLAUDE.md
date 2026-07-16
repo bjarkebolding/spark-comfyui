@@ -25,7 +25,7 @@ automatic and self-healing.
 Author/owner: GitHub `bjarkebolding`. Target repo name: `spark-comfyui`.
 Hardware in use: DGX Spark, hostname `sparky`, install root `~/comfyui-spark/`.
 Published: https://github.com/bjarkebolding/spark-comfyui.
-Current version: **2026.07.15.1** (MIT licensed, shellcheck-clean).
+Current version: **2026.07.16** (MIT licensed, shellcheck-clean).
 
 ## Versioning and releasing
 
@@ -101,13 +101,15 @@ README.md LICENSE .gitignore CLAUDE.md
 ```
 
 The script installs ComfyUI, the venv, and SageAttention next to itself
-(`ComfyUI/`, `comfyui-env/`, `SageAttention/`), all gitignored.
+(`ComfyUI/`, `comfyui-env/`, `SageAttention/`), and `backup` writes to
+`backups/`, all gitignored.
 
 ## Commands (dispatch at the bottom of the script)
 
 `install` · `run [args]` · `stop` · `update [--torch|--rollback]` · `doctor` ·
-`status [--watch [SEC]]` · `tune [--clock-cap MHZ] [--persist]` · `service` ·
-`--version`. Hidden back-compat aliases: `verify` (doctor), `monitor`
+`status [--watch [SEC]]` · `tune [--clock-cap MHZ] [--persist]` ·
+`backup [--with-output] [FILE]` · `restore FILE` · `reset [--yes]` ·
+`service` · `--version`. Hidden back-compat aliases: `verify` (doctor), `monitor`
 (status --watch), `rollback` (update --rollback), `bench` (removed, prints
 A/B guidance).
 
@@ -266,6 +268,102 @@ A dedicated pstate row duplicated the sm-clk story (P0 generating, P8 idle);
 it is a tag on the sm-clk row now. GB10 nvidia-smi N/A fields: `clocks.mem`,
 `fan.speed`, `temperature.memory`, `power.limit` (and `nvidia-smi -pl` does
 not work, hence `tune --clock-cap`).
+
+## reset / backup / restore
+
+Three commands, one shared definition of "user content": the readonly
+`USER_CONTENT` array near the top of the script (`models user input output
+custom_nodes extra_model_paths.yaml`). `reset` iterates it directly.
+`backup`/`restore` cover the same set but handle each entry with its own
+rules (manifests, filters), so they do not loop over the array; keep the
+three in sync by hand when the set changes.
+
+**reset (`cmd_reset`)**: wipe `INSTALL_DIR`, `VENV_DIR`, `SAGE_SRC` and rerun
+`cmd_install`, preserving user content via a hold directory. The hold dir is
+a sibling of the install dir (`.spark-reset-hold`), so every `mv` is a
+same-filesystem rename: instant even for 74 GB of models. Protocol, in order:
+
+1. Confirmation: the user must type the word `reset`; `--yes` skips it and
+   is required when stdin is not a terminal.
+2. Hold move: each `USER_CONTENT` entry is `mv`'d into the hold dir.
+   No-overwrite rule: if an entry already exists in the hold dir (left by an
+   interrupted earlier reset) AND in the install dir, `die`. Guessing which
+   copy is the user's is not this script's call.
+3. Wipe guard: before any `rm -rf`, re-check that no `USER_CONTENT` entry
+   remains under `INSTALL_DIR`. This is the line between "reset" and
+   "deleted the models after a failed mv".
+4. `cd "$BASE_DIR"` (the wipe may delete the caller's cwd, which would break
+   git/pip inside `cmd_install`), wipe, write `wiped` to `$hold_dir/.phase`,
+   then `cmd_install`.
+5. Move everything back (the fresh-from-git skeleton dirs lose to the
+   user's copies), then `git checkout -q --` each `USER_CONTENT` entry: the
+   held dirs carry stock tracked files from the old checkout
+   (`custom_nodes/websocket_image_save.py`, `models/configs/*`) and putting
+   them back at the fresh HEAD keeps the tree clean for `update`'s ff-only
+   merge. `checkout --` never touches untracked user files. Finally remove
+   `.phase` and `rmdir` the hold dir.
+
+Resume cases (re-running converges): interrupted before the wipe (no
+`.phase`), the hold move just continues, with the no-overwrite rule catching
+real collisions; interrupted anywhere after the wipe (`.phase` says
+`wiped`), `cmd_install` reruns unconditionally. A `.git` dir is no proof the
+interrupted install finished (clone is its first step), so there is
+deliberately no skip-install shortcut; `cmd_install` is idempotent and
+skips or refreshes whatever did complete. The hold dir lives inside the
+repo checkout on a default install, so `.gitignore` lists
+`.spark-reset-hold/` (a `git clean -fd` must never see held models as
+junk).
+
+**backup (`cmd_backup`)**: writes to `FILE` or a timestamped default under
+`backups/` next to the script. Only the small generated entries (meta,
+manifests, plain-node copies, config files) are staged in a mktemp dir
+(cleaned by an EXIT trap on failure); `user/`, `input/` and `output/` are
+tarred straight from the live tree with `--exclude` for logs and caches. tar
+runs with `--ignore-failed-read`, and exit status 1 (a file changed or
+vanished mid-read) is a warning, not a failure; that tolerance is what makes
+"safe while ComfyUI is serving" true. Archive format (top-level entries,
+`format=1`):
+
+- `meta`: `format=1`, tool version, ISO date, hostname, ComfyUI commit.
+- `user/`: `INSTALL_DIR/user` minus `*.log` files and `__pycache__`.
+- `input/` (only if non-empty); `output/` only with `--with-output`.
+- `comfyui-patches.list` and `extra_model_paths.yaml` if present.
+- `custom-nodes.manifest`: one `name<TAB>origin-url<TAB>commit` line per
+  git-cloned node. Entries tracked by ComfyUI's own git (checked with
+  `git ls-files`) are excluded, so stock files like
+  `websocket_image_save.py` never leak into the manifest.
+- `custom_nodes_plain/`: full copies of non-git nodes (minus `__pycache__`).
+- `models.manifest`: `bytes<TAB>relpath` for every file under `models/`,
+  sorted. Models are NEVER archived; the live install's backup was 3.7M
+  against 74 GB of models. Safe while ComfyUI is serving.
+
+**restore (`cmd_restore`)**: order matters. Unpack to a mktemp stage (EXIT
+trap cleans it on failure) and check `format=1`; `cmd_install` if
+`INSTALL_DIR/.git` is missing; `cmd_stop` unconditionally (it reports "not
+running" itself); merge `user/`, `input/`, `output/` (`cp -a` over the live
+tree); restore the two config files, saving a differing live copy aside as
+`.bak` first; custom nodes (plain copies, then manifest clones with a
+detached checkout of the pinned commit; a checkout miss and a failed
+per-node `pip install -r` are warnings, not failed restores; clone and pip
+run with stdin from `/dev/null` so a prompting clone cannot eat the
+manifest lines the loop is reading); `apply_source_patches`, because node
+pip installs can clobber torch and the mods pass re-verifies it; finally
+diff `models.manifest` against disk and list every missing file with its
+size. Idempotent: restoring onto a healthy install reports everything
+present.
+
+**doctor**: an info line (not pass/fail) in the self section names the
+newest `backups/spark-backup-*.tgz` and its age in days, or prints
+`Backup: none in backups/ (run: spark-comfyui.sh backup)`. It only knows
+about the default `backups/` dir; backups taken with an explicit FILE
+argument elsewhere are invisible to it, which the wording reflects.
+
+**Source guard**: just before the dispatch block,
+`if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi`. Sourcing the
+script defines all functions and returns before dispatch, so test harnesses
+can source it and stub commands. Caveats: sourcing still runs the top-level
+code (env defaults, sourcing `mod_common.sh`), and `USER_CONTENT` is
+`readonly`, so sourcing twice in one shell errors.
 
 ## GB10 domain knowledge (do not relitigate)
 
@@ -464,6 +562,10 @@ dry-run the transform on a fixture and `ast.parse` the result first.
   the attention backend) plus the per-session A/B `session:` summary line.
   rss/gpu-self/co-res became log-only. Field-verified with 3 live Krea-2
   gens (first 15.6s, steady ~12.6s; pre-watch gens correctly not counted).
+- **2026.07.16**: reset/backup/restore lifecycle commands (regenerate an
+  install or move to a new Spark without losing user content; models
+  manifested, never archived), the doctor backup info line, and the source
+  guard before dispatch for test harnesses.
 
 ## Release checklist (repeat per release)
 

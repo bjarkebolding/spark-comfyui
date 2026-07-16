@@ -26,7 +26,9 @@ mod_apply() {
   if [[ ! -f "$SAGE_MARKER" ]]; then
     rebuild=1
   elif [[ -d "$SAGE_SRC/.git" ]]; then
-    git -C "$SAGE_SRC" fetch -q origin
+    # Offline must not abort this critical mod: SAGE_REF pins a commit sha,
+    # so the drift compare below still works from local objects.
+    git -C "$SAGE_SRC" fetch -q origin 2>/dev/null || true
     local local_rev pinned_rev
     local_rev="$(git -C "$SAGE_SRC" rev-parse HEAD)"
     # An unresolvable SAGE_REF (bad pin, shallow history) must trigger a

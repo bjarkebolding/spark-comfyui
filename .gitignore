@@ -7,6 +7,13 @@ SageAttention/
 # Runtime artifacts
 thermal_monitor.log
 
+# Archives written by 'spark-comfyui.sh backup'
+backups/
+
+# Hold area of an in-flight or interrupted 'spark-comfyui.sh reset' — may
+# hold the user's models; must never look like junk to git clean
+.spark-reset-hold/
+
 # Personal patch list (may reference private forks; the script seeds a
 # commented template automatically on first install)
 comfyui-patches.list
