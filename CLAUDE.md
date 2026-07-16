@@ -25,7 +25,7 @@ automatic and self-healing.
 Author/owner: GitHub `bjarkebolding`. Target repo name: `spark-comfyui`.
 Hardware in use: DGX Spark, hostname `sparky`, install root `~/comfyui-spark/`.
 Published: https://github.com/bjarkebolding/spark-comfyui.
-Current version: **2026.07.16** (MIT licensed, shellcheck-clean).
+Current version: **2026.07.16.1** (MIT licensed, shellcheck-clean).
 
 ## Versioning and releasing
 
@@ -343,10 +343,11 @@ trap cleans it on failure) and check `format=1`; `cmd_install` if
 running" itself); merge `user/`, `input/`, `output/` (`cp -a` over the live
 tree); restore the two config files, saving a differing live copy aside as
 `.bak` first; custom nodes (plain copies, then manifest clones with a
-detached checkout of the pinned commit; a checkout miss and a failed
-per-node `pip install -r` are warnings, not failed restores; clone and pip
-run with stdin from `/dev/null` so a prompting clone cannot eat the
-manifest lines the loop is reading); `apply_source_patches`, because node
+detached checkout of the pinned commit; every freshly restored node's
+`requirements.txt` is pip-installed, plain copies included; a checkout miss
+and a failed per-node `pip install -r` are warnings, not failed restores;
+clone and pip run with stdin from `/dev/null` so a prompting clone cannot
+eat the manifest lines the loop is reading); `apply_source_patches`, because node
 pip installs can clobber torch and the mods pass re-verifies it; finally
 diff `models.manifest` against disk and list every missing file with its
 size. Idempotent: restoring onto a healthy install reports everything
@@ -566,6 +567,9 @@ dry-run the transform on a fixture and `ast.parse` the result first.
   install or move to a new Spark without losing user content; models
   manifested, never archived), the doctor backup info line, and the source
   guard before dispatch for test harnesses.
+- **2026.07.16.1**: restore also pip-installs the requirements of plain
+  (non-git) custom nodes, so Manager registry installs work on a
+  fresh-machine restore.
 
 ## Release checklist (repeat per release)
 

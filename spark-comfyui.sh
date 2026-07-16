@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.07.16 | License: MIT
+#  Version 2026.07.16.1 | License: MIT
 # =============================================================================
 #  One script for the whole lifecycle, tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory.
@@ -67,7 +67,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.07.16"
+VERSION="2026.07.16.1"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -1585,6 +1585,10 @@ cmd_restore() {
       else
         cp -a "$entry" "$INSTALL_DIR/custom_nodes/$name"
         echo "  + $name (plain copy)"
+        if [[ -f "$INSTALL_DIR/custom_nodes/$name/requirements.txt" ]]; then
+          pip install -r "$INSTALL_DIR/custom_nodes/$name/requirements.txt" </dev/null \
+            || warn "$name: pip install of its requirements failed — the node may not load"
+        fi
       fi
     done < <(find "$stage/custom_nodes_plain" -mindepth 1 -maxdepth 1)
   fi
