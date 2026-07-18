@@ -44,6 +44,11 @@ DEFAULTS = {
 }
 
 
+# Both parse failures a mangled config.ini produces: configparser.Error
+# covers structural damage, UnicodeDecodeError covers binary garbage.
+PARSE_ERRORS = (configparser.Error, UnicodeDecodeError)
+
+
 def load():
     cfg = configparser.ConfigParser()
     if os.path.isfile(path):
@@ -54,12 +59,24 @@ def load():
 
 
 if mode == "verify":
-    cfg = load()
+    try:
+        cfg = load()
+    except PARSE_ERRORS:
+        sys.exit(1)  # corrupt file = not active; apply heals it, verify must not mutate
     ok = cfg.get("default", "network_mode", fallback="") == "personal_cloud"
     sys.exit(0 if ok else 1)
 
 # apply
-cfg = load()
+# Self-heal a corrupt config.ini: without this the mod fails on every run
+# and nothing can fix it (doctor says "run update", update hits the same
+# parse error). The broken file is kept for inspection, then rebuilt.
+healed = False
+try:
+    cfg = load()
+except PARSE_ERRORS:
+    os.replace(path, path + ".bak")
+    healed = True
+    cfg = load()
 before = dict(cfg["default"])
 for k, v in ALWAYS.items():
     cfg.set("default", k, v)
@@ -85,9 +102,11 @@ if removed_stale:
 # Status protocol (see mods/README.md): first word is applied|present|
 # skipped, matching every other mod — only "applied" if this run actually
 # changed something (config write or stale-file cleanup).
-did_something = bool(changed) or removed_stale
+did_something = bool(changed) or removed_stale or healed
 msgs = ["applied" if did_something else "present",
         "config " + (f"updated ({', '.join(sorted(changed))})" if changed else "OK")]
+if healed:
+    msgs.append("config.ini was corrupt — saved aside as config.ini.bak, rebuilt")
 if removed_stale:
     msgs.append("removed stale pip_auto_fix.list (crashed Manager's version parser)")
 

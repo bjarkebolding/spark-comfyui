@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.07.16.1 | License: MIT
+#  Version 2026.07.18 | License: MIT
 # =============================================================================
 #  One script for the whole lifecycle, tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory.
@@ -67,7 +67,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.07.16.1"
+VERSION="2026.07.18"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -89,8 +89,12 @@ SAGE_SRC="${SAGE_SRC:-$BASE_DIR/SageAttention}"
 SAGE_REF="${SAGE_REF:-d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5}"
 REPO_URL="${REPO_URL:-https://github.com/Comfy-Org/ComfyUI.git}"
 TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu130}"
-# Community sm_121/aarch64/cu13 GPU onnxruntime (no official PyPI wheel exists)
-ORT_WHEEL_URL="${ORT_WHEEL_URL:-https://huggingface.co/Jay0515/onnxruntime-gpu-aarch64-cuda13-sm121/resolve/main/onnxruntime_gpu-1.25.0-cp312-cp312-linux_aarch64.whl}"
+# Community sm_121/aarch64/cu13 GPU onnxruntime (no official PyPI wheel
+# exists). The #sha256= fragment pins the exact bytes: pip verifies it before
+# installing, so a compromised or force-pushed hosting repo fails loudly
+# instead of installing silently. Overriding ORT_WHEEL_URL replaces the pin
+# too — re-add a fragment for your own wheel if you want the same guarantee.
+ORT_WHEEL_URL="${ORT_WHEEL_URL:-https://huggingface.co/Jay0515/onnxruntime-gpu-aarch64-cuda13-sm121/resolve/main/onnxruntime_gpu-1.25.0-cp312-cp312-linux_aarch64.whl#sha256=da487cc1ccd3aa11389efec14c6f0f8b6bd7ca6734423de3b528e578023cb200}"
 PORT="${PORT:-8188}"
 SAGE_MARKER="$VENV_DIR/.sage_ok"
 
@@ -171,7 +175,27 @@ sync_comfyui() {
   # Rollback point = wherever we were before this sync (base or patched).
   mkdir -p "$VENV_DIR" 2>/dev/null || true
   echo "$old_head" > "$VENV_DIR/.last_comfyui_rev" 2>/dev/null || true
-  git fetch -q origin
+  # Source-patch mods keep patched upstream files MODIFIED in this tree
+  # (e.g. mod 10's get_free_memory edit in comfy/model_management.py). The
+  # moment upstream touches such a file, git refuses the branch switch or
+  # the ff-only merge below ("local changes would be overwritten") and the
+  # whole update dies on a raw git error. Revert ONLY files carrying the
+  # spark marker — the mods pass re-applies them right after this sync.
+  # A user's own edits (no marker) are deliberately left alone.
+  local pf
+  while IFS= read -r pf; do
+    # if-form, not `grep && checkout`: a trailing markerless file would make
+    # the && list (and so the loop) return nonzero under set -e semantics
+    # that differ across shells — the if makes "no marker, skip" explicit.
+    if grep -qF "# spark-comfyui:" "$pf" 2>/dev/null; then
+      git checkout -q -- "$pf"
+    fi
+  done < <(git diff --name-only)
+  # timeout: a wedged network must fail the update cleanly, not hang it.
+  # 300s is generous for a fetch that can carry weeks of upstream history.
+  timeout 300 git fetch -q origin \
+    || die "could not fetch ComfyUI upstream (offline or unreachable) — check
+the network and re-run: $0 update"
   git checkout -q "$COMFY_BASE" 2>/dev/null \
     || git checkout -qb "$COMFY_BASE" "origin/$COMFY_BASE"
   local base_before
@@ -231,16 +255,20 @@ TPL
     case "$line" in
       pr:*|PR:*)
         num="${line#*:}"; desc="PR #$num"
-        git fetch -q origin "+pull/${num}/head:__patch_tmp" \
+        GIT_TERMINAL_PROMPT=0 git fetch -q origin "+pull/${num}/head:__patch_tmp" </dev/null \
           || { warn "  ! cannot fetch $desc (does it exist?)"; failed=1; continue; } ;;
       branch:*)
         br="${line#branch:}"; desc="origin branch '$br'"
-        git fetch -q origin "+${br}:__patch_tmp" \
+        GIT_TERMINAL_PROMPT=0 git fetch -q origin "+${br}:__patch_tmp" </dev/null \
           || { warn "  ! cannot fetch $desc"; failed=1; continue; } ;;
       remote:*)
         url="${line#remote:}"; br="${url##* }"; url="${url%% *}"
         desc="'$br' from $url"
-        git fetch -q "$url" "+${br}:__patch_tmp" \
+        # </dev/null + GIT_TERMINAL_PROMPT=0: a prompting fetch (typo'd or
+        # private URL -> 401 -> username prompt) must not hang the update or
+        # eat the patch-list lines this loop is reading from stdin — same
+        # trap cmd_restore's manifest loop guards against.
+        GIT_TERMINAL_PROMPT=0 git fetch -q "$url" "+${br}:__patch_tmp" </dev/null \
           || { warn "  ! cannot fetch $desc"; failed=1; continue; } ;;
       *)
         warn "  ! unrecognized patch line: '$line' (use pr:<N>, branch:<name>, or remote:<url> <branch>)"
@@ -444,7 +472,7 @@ self_update() {
   [[ -z "${SPARK_SELF_UPDATED:-}" ]] || return 0   # already updated this run
   [[ -d "$BASE_DIR/.git" ]] || return 0            # not installed via git clone
   local local_rev upstream_rev
-  if ! git -C "$BASE_DIR" fetch -q origin 2>/dev/null; then
+  if ! timeout 30 git -C "$BASE_DIR" fetch -q origin 2>/dev/null; then
     warn "self-update: could not reach the spark-comfyui repo (offline?) —
 continuing with the current version"
     return 0
@@ -743,6 +771,12 @@ cmd_tune() {
       *) die "Unknown tune option: $1 (use --clock-cap MHZ and/or --persist)" ;;
     esac
   done
+  # Validate up front: a bad value would otherwise die mid-run on nvidia-smi's
+  # error, skipping the remaining tune steps. 300 is the -lgc floor used below.
+  if [[ -n "$clock_cap" ]]; then
+    [[ "$clock_cap" =~ ^[0-9]+$ ]] && (( clock_cap >= 300 && clock_cap <= 4000 )) \
+      || die "--clock-cap needs a MHz value between 300 and 4000, e.g. 2100 (got: $clock_cap)"
+  fi
 
   log "Applying DGX Spark system tuning"
 
@@ -790,9 +824,18 @@ cmd_tune() {
 
   # 4) Optionally persist across reboots (swapoff and -lgc do not survive).
   if [[ "$persist" -eq 1 ]]; then
-    local lgc_line=""
-    [[ -n "$clock_cap" ]] && lgc_line="ExecStart=/usr/bin/nvidia-smi -lgc 300,$clock_cap"
-    sudo tee /etc/systemd/system/comfyui-tune.service >/dev/null <<UNIT
+    local unit=/etc/systemd/system/comfyui-tune.service lgc_line=""
+    if [[ -n "$clock_cap" ]]; then
+      lgc_line="ExecStart=/usr/bin/nvidia-smi -lgc 300,$clock_cap"
+    elif [[ -f "$unit" ]]; then
+      # Rewriting the unit without --clock-cap must not silently drop a
+      # previously persisted cap: losing it re-exposes the overcurrent
+      # hard-reboot the cap exists to prevent. Carry the old line over.
+      lgc_line="$(grep -m1 '^ExecStart=.*nvidia-smi -lgc' "$unit" 2>/dev/null || true)"
+      [[ -n "$lgc_line" ]] \
+        && echo "  keeping previously persisted clock cap (${lgc_line##*-lgc })"
+    fi
+    sudo tee "$unit" >/dev/null <<UNIT
 [Unit]
 Description=DGX Spark tuning for ComfyUI (swap off, persistence mode, clocks)
 After=multi-user.target
@@ -983,6 +1026,14 @@ cmd_status() {
   if [[ "${1:-}" == "--watch" || "${1:-}" == "-w" ]]; then
     local interval=5 logfile="$BASE_DIR/thermal_monitor.log"
     [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] && interval="$2"
+    # Rotate once per watch start when the log outgrows 50 MB (an always-on
+    # watch appends ~4 MB/day at the 5s default, more at 1s): the previous
+    # evidence survives in .1, and the box never fills up from telemetry.
+    if [[ -f "$logfile" ]] \
+       && (( "$(stat -c %s "$logfile" 2>/dev/null || echo 0)" > 52428800 )); then
+      mv -f "$logfile" "$logfile.1"
+      echo "rotated: previous $(basename "$logfile") -> $(basename "$logfile").1"
+    fi
     local i tick=0 cols win width
     # Sparkline window adapts to the terminal (label+value+stats ≈ 44 cols).
     cols="$(tput cols 2>/dev/null || echo "${COLUMNS:-100}")"
@@ -1322,6 +1373,9 @@ available after '$0 update' has moved ComfyUI forward at least once."
   [[ -f "$INSTALL_DIR/manager_requirements.txt" ]] \
     && pip install -r "$INSTALL_DIR/manager_requirements.txt"
   repair_torch
+  # The hard reset wiped the mods' source patches — re-apply them so the
+  # rolled-back tree isn't silently missing the GB10 fixes.
+  apply_source_patches
   rm -f "$rev_file"
   log "Rolled back. Restart with: $0 run"
 }
@@ -1541,8 +1595,10 @@ cmd_restore() {
     || die "not a spark-comfyui backup (meta lacks format=1): $archive"
   sed 's/^/  /' "$stage/meta"
 
-  if [[ ! -d "$INSTALL_DIR/.git" ]]; then
-    log "No install at $INSTALL_DIR — installing first"
+  # Also self-heal a half-gutted machine (checkout present, venv missing):
+  # cmd_install is idempotent and refreshes whatever part is there.
+  if [[ ! -d "$INSTALL_DIR/.git" || ! -f "$VENV_DIR/bin/activate" ]]; then
+    log "No complete install (ComfyUI checkout + venv) — installing first"
     cmd_install
   fi
   activate_venv
@@ -1595,6 +1651,13 @@ cmd_restore() {
   if [[ -f "$stage/custom-nodes.manifest" ]]; then
     while IFS=$'\t' read -r name url sha; do
       [[ -n "$name" ]] || continue
+      # The name lands in a path below custom_nodes/; a tampered archive
+      # must not be able to point it elsewhere. (Plain-copy names above come
+      # from basename and can't carry a path.)
+      case "$name" in
+        .|..|*/*)
+          warn "manifest names invalid node '$name' — skipped"; continue ;;
+      esac
       ndir="$INSTALL_DIR/custom_nodes/$name"
       if [[ -e "$ndir" ]]; then
         echo "  = $name (present)"
@@ -1629,6 +1692,9 @@ cmd_restore() {
   if [[ -f "$stage/models.manifest" ]]; then
     while IFS=$'\t' read -r size relpath; do
       [[ -n "$relpath" ]] || continue
+      # A corrupt manifest line must not kill the restore via the size
+      # arithmetic below (set -e); treat the size as unknown instead.
+      [[ "$size" =~ ^[0-9]+$ ]] || size=0
       [[ -f "$INSTALL_DIR/models/$relpath" ]] && continue
       printf '  missing: %s (%s)\n' "$relpath" "$(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B")"
       missing_count=$((missing_count + 1))
@@ -2020,6 +2086,7 @@ cmd_service() {
   cat > "$HOME/.config/systemd/user/comfyui.service" <<UNIT
 [Unit]
 Description=ComfyUI (DGX Spark)
+Wants=network-online.target
 After=network-online.target
 
 [Service]

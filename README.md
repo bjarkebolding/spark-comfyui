@@ -145,7 +145,7 @@ $ ./spark-comfyui.sh doctor
 
 `status --watch` during a run. Every line is a timeseries, heat-colored by value. Rows for throttle flags, swap and generation telemetry render only when they carry information, and each appears with its window history intact because sampling never stops.
 
-The GENERATION section (its header names the attention backend) comes from ComfyUI's own API: `gen` duration history with the in-flight one ticking in the margin, live sampling speed (`it/s`; a drop mid-window means throttling or background load), `latency` from queue submission to saved output, queue depth, and the node-cache `hit rate` (high means repeat jobs reuse prompt embeds and loaded models). Every sample also lands in `thermal_monitor.log` so the trail survives a hard reboot:
+The GENERATION section (its header names the attention backend) comes from ComfyUI's own API: `gen` duration history with the in-flight one ticking in the margin, live sampling speed (`it/s`; a drop mid-window means throttling or background load), `latency` from queue submission to saved output, queue depth, and the node-cache `hit rate` (high means repeat jobs reuse prompt embeds and loaded models). Every sample also lands in `thermal_monitor.log` so the trail survives a hard reboot. When that log passes 50 MB, the next watch start moves it to `thermal_monitor.log.1` and begins fresh:
 
 ```console
 $ ./spark-comfyui.sh status --watch 3

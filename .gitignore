@@ -5,7 +5,7 @@ comfyui-env/
 SageAttention/
 
 # Runtime artifacts
-thermal_monitor.log
+thermal_monitor.log*
 
 # Archives written by 'spark-comfyui.sh backup'
 backups/

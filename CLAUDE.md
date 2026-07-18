@@ -25,7 +25,7 @@ automatic and self-healing.
 Author/owner: GitHub `bjarkebolding`. Target repo name: `spark-comfyui`.
 Hardware in use: DGX Spark, hostname `sparky`, install root `~/comfyui-spark/`.
 Published: https://github.com/bjarkebolding/spark-comfyui.
-Current version: **2026.07.16.1** (MIT licensed, shellcheck-clean).
+Current version: **2026.07.18** (MIT licensed, shellcheck-clean).
 
 ## Versioning and releasing
 
@@ -193,6 +193,16 @@ Mods run in **filename order** (numeric prefix; this is what gives `05`
 setuptools before `20` torch before `40` Sage). `_`-prefixed dirs are skipped.
 Disable all mods, including the pre-run guard, with `SPARK_SOURCE_PATCHES=0`.
 
+Patched files sit MODIFIED in ComfyUI's working tree between updates. That
+is why `sync_comfyui` reverts every tracked modified file carrying the
+`# spark-comfyui:` marker before its branch switch and ff-only merge (the
+mods pass re-applies them right after): without the revert, the first
+upstream commit touching a patched file kills `update` on git's "local
+changes would be overwritten" error (reproduced 2026-07-18). User edits
+without a marker are deliberately left alone. `cmd_rollback` runs
+`apply_source_patches` after its hard reset for the same reason: the reset
+wipes the patches.
+
 Adding a source-patch mod: drop a new `mods/NN-name/` dir; no main-script
 edits needed. A venv-package mod needs its underlying logic added to
 `mod_common.sh` too if it doesn't already live there.
@@ -339,8 +349,8 @@ vanished mid-read) is a warning, not a failure; that tolerance is what makes
 
 **restore (`cmd_restore`)**: order matters. Unpack to a mktemp stage (EXIT
 trap cleans it on failure) and check `format=1`; `cmd_install` if
-`INSTALL_DIR/.git` is missing; `cmd_stop` unconditionally (it reports "not
-running" itself); merge `user/`, `input/`, `output/` (`cp -a` over the live
+`INSTALL_DIR/.git` or the venv is missing (self-heals a half-gutted
+machine); `cmd_stop` unconditionally (it reports "not running" itself); merge `user/`, `input/`, `output/` (`cp -a` over the live
 tree); restore the two config files, saving a differing live copy aside as
 `.bak` first; custom nodes (plain copies, then manifest clones with a
 detached checkout of the pinned commit; every freshly restored node's
@@ -488,7 +498,10 @@ dry-run the transform on a fixture and `ast.parse` the result first.
   refactor that moved venv-package steps into mods/). No connection between
   the two beyond the number.
 - The community ONNX wheel URL and the "PRs already merged" note in the patch
-  template will age; refresh periodically.
+  template will age; refresh periodically. The URL carries a `#sha256=` pin
+  since 2026.07.18 (pip verifies it before installing); a URL refresh must
+  update the hash in the same edit, sourced from the HF API's lfs.oid and
+  confirmed against a real download.
 - **NVFP4 (verified 2026-07, no mod needed)**: `comfy-kitchen` is a stock
   ComfyUI dependency now (`ComfyUI/requirements.txt` pins it directly,
   currently 0.2.18), not something spark-comfyui.sh adds. Its NVFP4 kernels
@@ -570,6 +583,23 @@ dry-run the transform on a fixture and `ast.parse` the result first.
 - **2026.07.16.1**: restore also pip-installs the requirements of plain
   (non-git) custom nodes, so Manager registry installs work on a
   fresh-machine restore.
+- **2026.07.18**: hardening round, two passes in one release. Pass 1:
+  onnxruntime wheel pinned by sha256 (pip verifies the URL fragment; hash
+  confirmed against a live download), patch-list fetches prompt-proofed
+  (GIT_TERMINAL_PROMPT=0 plus detached stdin, the restore-loop fix applied
+  to the older loop), thermal log rotates to .1 at 50 MB on watch start
+  (field-tested both directions), restore rejects path-traversal node names
+  from tampered manifests, update fetches get timeouts (300s ComfyUI, 30s
+  self) and a clean offline die, service unit gains
+  Wants=network-online.target. Pass 2: sync_comfyui reverts marker-patched
+  files before the ff-merge so update survives upstream touching a patched
+  file (failure reproduced first, then regression-tested), tune --persist
+  carries over a previously persisted clock cap instead of silently
+  dropping it, rollback re-applies the mods pass after its hard reset,
+  configure.py self-heals a corrupt config.ini on apply (verify stays
+  read-only), restore tolerates corrupt manifest size fields and installs
+  when the venv is missing, tune validates --clock-cap as 300-4000 MHz up
+  front.
 
 ## Release checklist (repeat per release)
 
