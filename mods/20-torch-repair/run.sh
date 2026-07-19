@@ -28,14 +28,21 @@ mod_apply() {
   if mod_verify; then
     mod_export "STATUS=applied repaired CUDA torch"
   else
-    return 1   # still broken after repair — critical, this must abort loudly
+    # still broken after repair — critical, this must abort loudly, and the
+    # diag names the actual CUDA error (is_available() swallows it)
+    torch_cuda_diag
+    return 1
   fi
 }
 
 mod_prerun() {
   mod_verify && return 0
   repair_torch
-  mod_verify   # nonzero here -> still broken -> critical abort before launch
+  if mod_verify; then
+    return 0
+  fi
+  torch_cuda_diag   # still broken -> critical abort before launch, with cause
+  return 1
 }
 
 mod_verify() {

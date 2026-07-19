@@ -295,6 +295,40 @@ PY
   fi
 }
 
+# Printed when a torch CUDA check fails. torch.cuda.is_available() swallows
+# the underlying driver error; torch.cuda.init() raises it. Naming the real
+# cause turns a field report into a one-post diagnosis (a bare
+# AssertionError on a GX10 with a pre-CUDA-13 driver cost a forum
+# round-trip, 2026-07-19). Always exits 0: the caller decides failure.
+torch_cuda_diag() {
+  python - <<'PY' 2>&1
+import sys
+try:
+    import torch
+except Exception as e:
+    print(f"  diag: torch import failed: {e}")
+    sys.exit(0)
+cv = torch.version.cuda or ""
+if not cv.startswith("13"):
+    build = f"CUDA {cv}" if cv else "no CUDA (a CPU-only build)"
+    print(f"  diag: torch {torch.__version__} is compiled for {build}, not CUDA 13.")
+    print("        A package re-pinned torch; 'update' reinstalls the cu130 wheels.")
+    sys.exit(0)
+try:
+    torch.cuda.init()
+except Exception as e:
+    msg = str(e).strip().replace("\n", "\n        ")
+    print("  diag: the cu130 wheel is installed but CUDA failed to initialize:")
+    print(f"        {msg}")
+    print("  diag: that is a host problem, not a venv problem. Check nvidia-smi")
+    print("        (torch cu130 needs an r580+ driver reporting CUDA 13) and")
+    print("        reboot after any driver update.")
+    sys.exit(0)
+print(f"  diag: CUDA initializes fine ({torch.cuda.get_device_name(0)});")
+print("        the failure above lies elsewhere.")
+PY
+}
+
 # Build SageAttention natively for GB10 and verify with a LIVE kernel test.
 # A broken build silently falls back to PyTorch attention inside ComfyUI,
 # so we fail loudly instead of shipping a silently-degraded install.

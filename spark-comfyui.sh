@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.07.18 | License: MIT
+#  Version 2026.07.19 | License: MIT
 # =============================================================================
 #  One script for the whole lifecycle, tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory.
@@ -67,7 +67,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.07.18"
+VERSION="2026.07.19"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -1778,8 +1778,9 @@ PY
   then
     ok "torch is the cu130 CUDA build and sees the GPU"
   else
-    bad "torch is CPU-only or wrong CUDA — a custom node likely re-pinned it.
-        Fix: $0 update (repairs torch automatically)"
+    torch_cuda_diag
+    bad "torch cannot use the GPU — the diag lines above name the cause.
+        If torch was re-pinned: $0 update (repairs it automatically)"
   fi
 
   # Whole-venv dependency graph: catches pin violations generically (e.g.

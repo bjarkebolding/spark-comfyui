@@ -25,7 +25,7 @@ automatic and self-healing.
 Author/owner: GitHub `bjarkebolding`. Target repo name: `spark-comfyui`.
 Hardware in use: DGX Spark, hostname `sparky`, install root `~/comfyui-spark/`.
 Published: https://github.com/bjarkebolding/spark-comfyui.
-Current version: **2026.07.18** (MIT licensed, shellcheck-clean).
+Current version: **2026.07.19** (MIT licensed, shellcheck-clean).
 
 ## Versioning and releasing
 
@@ -79,7 +79,8 @@ mods/                     # discovered, applied and self-healed automatically
                           # mod_export, and the GB10 venv-package functions
                           # (need_nvcc, sage_kernel_ok, onnx_gpu_ok,
                           # ensure_onnx_gpu, ensure_setuptools_compat,
-                          # repair_torch, build_and_verify_sage). Sourced by
+                          # repair_torch, torch_cuda_diag,
+                          # build_and_verify_sage). Sourced by
                           # the main script itself at startup, not just mods.
   05-setuptools-compat/   # setuptools pinned within torch's own constraint
     run.sh
@@ -600,6 +601,13 @@ dry-run the transform on a fixture and `ast.parse` the result first.
   read-only), restore tolerates corrupt manifest size fields and installs
   when the venv is missing, tune validates --clock-cap as 300-4000 MHz up
   front.
+- **2026.07.19**: torch_cuda_diag. Every torch CUDA check failure (doctor,
+  mod 20 apply and prerun) now prints the real torch.cuda.init() exception
+  plus a host-vs-venv hint, instead of a bare AssertionError. Prompted by a
+  GX10 field report where the correct cu130 wheel was installed but the
+  host driver could not initialize CUDA; doctor's failure text no longer
+  guesses "a custom node re-pinned it". All four diag branches exercised
+  live on the GB10.
 
 ## Release checklist (repeat per release)
 
