@@ -1,0 +1,9 @@
+# The build context is BASE_DIR, which on a live install also holds the
+# ComfyUI checkout, the venv, SageAttention and backups (100+ GB). Whitelist
+# only what the image build needs.
+*
+!spark-comfyui.sh
+!mods
+!mods/**
+!container
+!container/**

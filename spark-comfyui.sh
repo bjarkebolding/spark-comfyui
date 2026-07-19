@@ -57,6 +57,16 @@
 #                              inputs, outputs and custom nodes. The nuclear
 #                              option for when doctor's fixes don't stick.
 #    service                   Install + start a systemd user service.
+#    container build|run|stop|shell
+#                              EXPERIMENTAL containerized runtime (the
+#                              roadmap; the native path above becomes
+#                              legacy once this matures). 'build' bakes an
+#                              image (ComfyUI + venv + SageAttention + mods);
+#                              'run' launches it with user content
+#                              (models, workflows, custom nodes, outputs)
+#                              bind-mounted from this install. Custom-node
+#                              code runs confined: no host files beyond the
+#                              mounts, dropped capabilities.
 #
 #  Typical day: install once -> run -> update now and then.
 #  Something feels wrong? -> doctor tells you what and how to fix it.
@@ -117,6 +127,11 @@ PATCH_BRANCH="spark-patched"
 # verified through a small contract (see mods/README.md). Toggle all mods
 # off with SPARK_SOURCE_PATCHES=0.
 MODS_DIR="${MODS_DIR:-$BASE_DIR/mods}"
+
+# Containerized runtime (EXPERIMENTAL, `container` subcommands): image and
+# container name, both overridable.
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-spark-comfyui}"
+CONTAINER_NAME="${CONTAINER_NAME:-spark-comfyui}"
 
 # User content inside the ComfyUI tree: what reset holds aside while it
 # wipes and reinstalls everything else. backup/restore cover the same set
@@ -2104,6 +2119,117 @@ UNIT
   echo "Service installed. Logs: journalctl --user -u comfyui -f"
 }
 
+# =============================================================================
+#  container (EXPERIMENTAL) — the containerized runtime, phase 1
+# =============================================================================
+# The image holds everything reproducible (ComfyUI at a pinned commit, venv
+# with cu130 torch, native sm_121 SageAttention, GPU onnxruntime, build-time
+# mods); the USER_CONTENT set is bind-mounted from this install's tree, so
+# native and container runs share models/workflows/custom nodes. The build
+# has no GPU, so the live kernel gates run in the container entrypoint on
+# every start (container/entrypoint.sh), not at build time.
+
+need_docker() {
+  command -v docker >/dev/null 2>&1 \
+    || die "docker not found — DGX OS ships it; otherwise install Docker and
+the NVIDIA Container Toolkit, then re-run."
+  docker info 2>/dev/null | grep -q "nvidia" \
+    || warn "the nvidia runtime is not visible in 'docker info' — GPU
+passthrough may fail (install/configure the NVIDIA Container Toolkit)"
+}
+
+cmd_container_build() {
+  need_docker
+  log "Resolving upstream ComfyUI master"
+  local comfy_sha
+  comfy_sha="$(timeout 30 git ls-remote "$REPO_URL" refs/heads/master 2>/dev/null \
+    | awk 'NR==1{print $1}')"
+  [[ -n "$comfy_sha" ]] \
+    || die "could not resolve ComfyUI master from $REPO_URL (offline or
+unreachable) — check the network and re-run: $0 container build"
+  local date_tag; date_tag="$(date +%Y.%m.%d)"
+  log "Building $CONTAINER_IMAGE:$date_tag (ComfyUI ${comfy_sha:0:12}, SageAttention ${SAGE_REF:0:12})"
+  echo "  First build downloads torch (>1 GB) and compiles SageAttention"
+  echo "  (10-30 min). Rebuilds reuse every layer that didn't change."
+  docker build \
+    -f "$BASE_DIR/container/Dockerfile" \
+    --build-arg TORCH_INDEX="$TORCH_INDEX" \
+    --build-arg REPO_URL="$REPO_URL" \
+    --build-arg COMFY_SHA="$comfy_sha" \
+    --build-arg SAGE_REF="$SAGE_REF" \
+    --build-arg ORT_WHEEL_URL="$ORT_WHEEL_URL" \
+    -t "$CONTAINER_IMAGE:$date_tag" \
+    -t "$CONTAINER_IMAGE:latest" \
+    "$@" \
+    "$BASE_DIR"
+  log "Image ready: $CONTAINER_IMAGE:latest (also tagged :$date_tag)"
+  echo "  Launch it: $0 container run"
+}
+
+cmd_container_run() {
+  need_docker
+  docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1 \
+    || die "image $CONTAINER_IMAGE:latest not found — run: $0 container build"
+  # Bind-mount exactly the USER_CONTENT set. Dirs are created if missing so
+  # a container-only setup works without a native install; the yaml entry is
+  # a file and only mounted when it exists (docker would create a dir).
+  local vols=() entry
+  for entry in "${USER_CONTENT[@]}"; do
+    if [[ "$entry" == *.yaml ]]; then
+      [[ -f "$INSTALL_DIR/$entry" ]] \
+        && vols+=(-v "$INSTALL_DIR/$entry:/opt/ComfyUI/$entry:ro")
+    else
+      mkdir -p "$INSTALL_DIR/$entry"
+      vols+=(-v "$INSTALL_DIR/$entry:/opt/ComfyUI/$entry")
+    fi
+  done
+  log "Launching containerized ComfyUI on port $PORT (Ctrl-C stops it)"
+  # Hardening: no capabilities, no privilege escalation, only the GPU
+  # exposed. The named cache volume keeps pip downloads and compiled sm_121
+  # CUDA kernels across container recreation (the container itself is --rm:
+  # every launch starts from the immutable image).
+  exec docker run --rm --name "$CONTAINER_NAME" \
+    --gpus all \
+    --shm-size 1g \
+    --cap-drop ALL \
+    --security-opt no-new-privileges \
+    -p "$PORT:8188" \
+    -v "$CONTAINER_IMAGE-cache:/home/comfy/.cache" \
+    -e SPARK_BF16 \
+    -e SPARK_STATIC_VRAM \
+    "${vols[@]}" \
+    "$CONTAINER_IMAGE:latest" "$@"
+}
+
+cmd_container_stop() {
+  need_docker
+  if [[ -n "$(docker ps -q -f "name=^${CONTAINER_NAME}$")" ]]; then
+    log "Stopping container $CONTAINER_NAME"
+    docker stop "$CONTAINER_NAME" >/dev/null
+    echo "Stopped."
+  else
+    info "container $CONTAINER_NAME is not running"
+  fi
+}
+
+cmd_container_shell() {
+  need_docker
+  docker exec -it "$CONTAINER_NAME" bash \
+    || die "could not exec into $CONTAINER_NAME — is it running? ($0 container run)"
+}
+
+cmd_container() {
+  local sub="${1:-}"
+  shift || true
+  case "$sub" in
+    build) cmd_container_build "$@" ;;
+    run)   cmd_container_run "$@" ;;
+    stop)  cmd_container_stop ;;
+    shell) cmd_container_shell ;;
+    *) die "Unknown container subcommand: ${sub:-<none>} (try: container build | run | stop | shell)" ;;
+  esac
+}
+
 # ------------------------------- Dispatch -----------------------------------
 # Sourced rather than executed (test harnesses source this file for its
 # function definitions): stop here, never dispatch.
@@ -2127,6 +2253,7 @@ case "$CMD" in
   restore)  cmd_restore "$@" ;;
   reset)    cmd_reset "$@" ;;
   service)  cmd_service ;;
+  container) cmd_container "$@" ;;
   # --- hidden backward-compat aliases (old command names still work) ---
   verify)   cmd_doctor ;;
   monitor)  cmd_status --watch ;;
@@ -2137,5 +2264,5 @@ real gains. A/B your actual workflow instead: time it, then
 re-time, and restore with: touch $SAGE_MARKER" ;;
   ""|-h|--help|help) usage ;;
   -v|--version|version) echo "spark-comfyui $VERSION" ;;
-  *) die "Unknown command: $CMD (try: install | run | stop | update | doctor | status | tune | backup | restore | reset | service)" ;;
+  *) die "Unknown command: $CMD (try: install | run | stop | update | doctor | status | tune | backup | restore | reset | service | container)" ;;
 esac
