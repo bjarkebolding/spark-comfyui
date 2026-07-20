@@ -5,7 +5,7 @@
 # the user's comfyui-patches.list merged on top, when present), the venv
 # with cu130 torch, a native sm_121 SageAttention build, the GPU onnxruntime
 # wheel, and the build-time mods. User content is bind-mounted at run time
-# per the mount contract in ROADMAP.md.
+# per the mount contract (spark-mounts.conf, resolve_mounts in the script).
 #
 # No GPU exists at image-build time, so the live kernel gates (golden rule 3)
 # run in the entrypoint on every start instead of here.

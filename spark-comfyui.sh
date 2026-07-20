@@ -135,7 +135,7 @@ MODS_DIR="${MODS_DIR:-$BASE_DIR/mods}"
 # container name, both overridable.
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-spark-comfyui}"
 CONTAINER_NAME="${CONTAINER_NAME:-spark-comfyui}"
-# Container-only layout (container/ROADMAP.md): all user content under one
+# Container-only layout: all user content under one
 # data/ directory, mount overrides in spark-mounts.conf next to the script.
 DATA_DIR="${DATA_DIR:-$BASE_DIR/data}"
 MOUNTS_CONF="${MOUNTS_CONF:-$BASE_DIR/spark-mounts.conf}"
@@ -1108,7 +1108,7 @@ cmd_restore() {
 # GPU, so the live kernel gates run in the container entrypoint on every
 # start (container/entrypoint.sh), not at build time.
 
-# Mount resolution (container/ROADMAP.md is the contract). Per entry: a
+# Mount resolution. Per entry: a
 # spark-mounts.conf key wins, else DATA_DIR/<entry>. Fills
 # RESOLVED_ENTRIES/RESOLVED_PATHS (parallel arrays) and EXTRA_MOUNTS
 # (HOST:CONTAINER[:ro] strings, validated).

@@ -87,7 +87,6 @@ container/
   entrypoint.sh           # runtime half of the mod system (see below)
   build-mods.sh           # build-time half (mods 05 + 10)
   build-patches.sh        # merges comfyui-patches.list in-build
-  ROADMAP.md              # the container-only architecture + phase log
 mods/                     # mod contract + shared helper library
   _lib/mod_common.sh      # py_patch_file, torch_cuda_diag, sage_kernel_ok,
                           # onnx_gpu_ok, kitchen_nvfp4_ok, repair_torch...
@@ -361,10 +360,11 @@ and its age, or that none exists. Only knows the default `backups/` dir.
 
 ## Containerization (THE architecture since the cut)
 
-`container/ROADMAP.md` is the decided architecture document and phase log;
-read it before re-deriving any of this. The cut (phase 3d) is complete on
-`container-dev`: the native path is deleted from the script; the last
-native release is reachable as the v2026.07.19 tag.
+The architecture below was designed and executed as phases 1-3d on
+container-dev during 2026-07-19/20 (the planning document,
+container/ROADMAP.md, was deleted after execution; the phase log lives in
+the git history and the release history below). The last native release
+is reachable as the v2026.07.19 tag.
 
 Split: the image holds everything reproducible (ComfyUI at a pinned commit,
 venv with cu130 torch, native sm_121 SageAttention at SAGE_REF, the
@@ -415,8 +415,7 @@ Field-learned docker gotchas (do not re-derive):
   BASE_DIR on a live install holds 100+ GB next to the Dockerfile.
 
 Phase status: 1 through 3d are COMPLETE and field-verified on the GB10
-(2026-07-19/20); see container/ROADMAP.md and the git log on container-dev
-for the per-phase detail. The cutover gate (3c) passed decisively: same
+(2026-07-19/20); the git log carries the per-phase detail. The cutover gate (3c) passed decisively: same
 Krea-2 Turbo workflow and seeds, fresh launch per condition, native
 first=29.8s steady=13.59s vs container first=28.9s steady=13.61s (0.15%
 steady delta against a 3% threshold), and all four seed-matched output
@@ -608,8 +607,7 @@ dry-run the transform on a fixture and `ast.parse` the result first.
   stay-native users. Cutover gate: native steady 13.59s vs container
   13.61s on the production Krea-2 workflow, seed-matched outputs
   bit-identical. Developed as phases 1-3d on container-dev, each
-  field-verified on the GB10; details in container/ROADMAP.md and the
-  phase commits.
+  field-verified on the GB10; details in the phase commits.
 - **2026.07.20.1**: legacy cleanup. The migrate command, the legacy mount
   fallback, the legacy content-root support in backup/restore, the native
   systemd branch in stop, and the INSTALL_DIR/VENV_DIR/SAGE_SRC vars are
