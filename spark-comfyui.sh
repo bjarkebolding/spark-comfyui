@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.07.20 | License: MIT
+#  Version 2026.07.20.1 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -23,7 +23,7 @@
 #                              survives crashes and reboots. --disable
 #                              removes it.
 #    stop                      Stop ComfyUI (container, service or a stray
-#                              native process).
+#                              process).
 #    update [--torch|--rollback]
 #                              Self-update this tool, then rebuild the image
 #                              on current ComfyUI master (cached layers make
@@ -66,12 +66,10 @@
 #                              cache volume, then rebuild from scratch. The
 #                              nuclear option; your content (data/) is
 #                              never touched.
-#    migrate [--keep-legacy] [--yes]
-#                              One-time move from the old native layout into
-#                              data/ (instant renames, nothing copied).
-#                              Without --keep-legacy also deletes the old
-#                              checkout, venv and SageAttention tree (all
-#                              reproducible, ~15-20 GB) after confirming.
+#
+#  Upgrading from a pre-container (native) install: the migration tooling
+#  lives in the v2026.07.20 tag (git checkout v2026.07.20, run 'migrate',
+#  return to main), or stay native on the v2026.07.19 tag.
 #
 #  Mounts: data/ holds models, user, input, output, custom_nodes. Override
 #  per-entry paths or add extra mounts (e.g. a NAS share) in
@@ -88,7 +86,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.07.20"
+VERSION="2026.07.20.1"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -97,11 +95,7 @@ VERSION="2026.07.20"
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 BASE_DIR="${BASE_DIR:-$(dirname "$SELF")}"
 
-# All overridable via environment if you want them elsewhere, e.g.:
-#   INSTALL_DIR=/data/ComfyUI VENV_DIR=/data/venv ./spark-comfyui.sh install
-INSTALL_DIR="${INSTALL_DIR:-$BASE_DIR/ComfyUI}"
-VENV_DIR="${VENV_DIR:-$BASE_DIR/comfyui-env}"
-SAGE_SRC="${SAGE_SRC:-$BASE_DIR/SageAttention}"
+# All overridable via environment if you want them elsewhere.
 # Pinned, not tracking thu-ml/SageAttention's default branch: 3.x showed
 # mosaic artifacts on GB10 (a visual regression the live kernel test can't
 # catch — it checks shape/finiteness, not output correctness). This is the
@@ -117,7 +111,6 @@ TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu130}"
 # too — re-add a fragment for your own wheel if you want the same guarantee.
 ORT_WHEEL_URL="${ORT_WHEEL_URL:-https://huggingface.co/Jay0515/onnxruntime-gpu-aarch64-cuda13-sm121/resolve/main/onnxruntime_gpu-1.25.0-cp312-cp312-linux_aarch64.whl#sha256=da487cc1ccd3aa11389efec14c6f0f8b6bd7ca6734423de3b528e578023cb200}"
 PORT="${PORT:-8188}"
-SAGE_MARKER="$VENV_DIR/.sage_ok"
 
 # Network resilience: the wheels involved are huge (torch cu130 is >1 GB,
 # the GPU onnxruntime ~220 MB) and a single dropped connection would abort
@@ -835,27 +828,20 @@ cmd_status() {
 
   hdr "Versions"
   echo "  spark-comfyui: $VERSION"
-  if [[ -d "$INSTALL_DIR/.git" ]]; then
-    echo "  ComfyUI: $(git -C "$INSTALL_DIR" log -1 --format='%h %cd %s' --date=short) [branch: $(git -C "$INSTALL_DIR" rev-parse --abbrev-ref HEAD)]"
-    if [[ -f "$PATCH_LIST" ]] && grep -qE '^[^#[:space:]]' "$PATCH_LIST"; then
-      echo "  patch list: $(grep -cE '^[^#[:space:]]' "$PATCH_LIST") entries in $PATCH_LIST"
-    fi
-  elif command -v docker >/dev/null 2>&1 \
+  if command -v docker >/dev/null 2>&1 \
        && docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1; then
-    # Container-only host: no checkout; the image label carries the commit.
+    # The image label carries the commit (no host checkout exists).
     local csha built
     csha="$(docker image inspect -f '{{index .Config.Labels "org.spark-comfyui.comfy-sha"}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
     built="$(docker image inspect -f '{{.Created}}' "$CONTAINER_IMAGE:latest" | cut -dT -f1)"
     echo "  ComfyUI: ${csha:0:12} (image $CONTAINER_IMAGE:latest, built $built)"
+  else
+    echo "  ComfyUI: no image built yet (run: $0 install)"
   fi
-  if [[ -f "$VENV_DIR/bin/activate" ]]; then
-    # shellcheck disable=SC1091
-    source "$VENV_DIR/bin/activate"
-    python -c "import torch; print(f'  torch: {torch.__version__} (CUDA {torch.version.cuda})')" 2>/dev/null
-    [[ -f "$SAGE_MARKER" ]] && echo "  SageAttention: verified" || echo "  SageAttention: NOT verified"
+  if [[ -f "$PATCH_LIST" ]] && grep -qE '^[^#[:space:]]' "$PATCH_LIST"; then
+    echo "  patch list: $(grep -cE '^[^#[:space:]]' "$PATCH_LIST") entries in $PATCH_LIST"
   fi
-  # The Manager config lives under the resolved user mount (data/ on a
-  # container-only host, the checkout on a legacy one).
+  # The Manager config lives under the resolved user mount.
   resolve_mounts
   local cfg="" ci
   for ci in "${!RESOLVED_ENTRIES[@]}"; do
@@ -870,15 +856,12 @@ cmd_status() {
 #  stop
 # =============================================================================
 cmd_stop() {
-  if systemctl --user is-active comfyui.service >/dev/null 2>&1; then
-    systemctl --user stop comfyui.service
-    echo "systemd service stopped"
-  elif command -v docker >/dev/null 2>&1 \
+  if command -v docker >/dev/null 2>&1 \
        && [[ -n "$(docker ps -q -f "name=^${CONTAINER_NAME}$" 2>/dev/null)" ]]; then
-    # The containerized server: docker stop, never pkill — the container
-    # python matches the pkill pattern below (host-visible process), and
-    # killing pid 1 of a service-mode container would only make the
-    # restart policy relaunch it.
+    # docker stop, never pkill — the container python matches the pkill
+    # pattern below (host-visible process), and killing pid 1 of a
+    # service-mode container would only make the restart policy relaunch
+    # it.
     docker stop "$CONTAINER_NAME" >/dev/null
     echo "container stopped"
   elif pgrep -f "main.py --listen" >/dev/null 2>&1; then
@@ -916,17 +899,12 @@ cmd_backup() {
   fi
   case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
 
-  # The ComfyUI commit: from the checkout when one exists, else from the
-  # image label (container-only hosts have no checkout).
+  # The ComfyUI commit comes from the image label.
   local ccommit
-  if [[ -d "$INSTALL_DIR/.git" ]]; then
-    ccommit="$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
-  else
-    ccommit="$(docker image inspect \
-      -f '{{index .Config.Labels "org.spark-comfyui.comfy-sha"}}' \
-      "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
-    [[ -n "$ccommit" ]] || ccommit=unknown
-  fi
+  ccommit="$(docker image inspect \
+    -f '{{index .Config.Labels "org.spark-comfyui.comfy-sha"}}' \
+    "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
+  [[ -n "$ccommit" ]] || ccommit=unknown
 
   log "Staging backup"
   local stage; stage="$(mktemp -d)"
@@ -952,12 +930,6 @@ cmd_backup() {
     while IFS= read -r entry; do
       name="$(basename "$entry")"
       [[ "$name" == "__pycache__" ]] && continue
-      # Stock-file exclusion needs the checkout's git; on a container-only
-      # host the stock files live as plain files in data/custom_nodes and
-      # ride along as tiny plain copies — harmless.
-      if [[ -d "$INSTALL_DIR/.git" ]]; then
-        [[ -z "$(git -C "$INSTALL_DIR" ls-files "custom_nodes/$name" 2>/dev/null)" ]] || continue
-      fi
       if [[ -d "$entry/.git" ]]; then
         url="$(git -C "$entry" remote get-url origin 2>/dev/null || echo unknown)"
         sha="$(git -C "$entry" rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -1017,16 +989,10 @@ cmd_restore() {
     || die "not a spark-comfyui backup (meta lacks format=1): $archive"
   sed 's/^/  /' "$stage/meta"
 
-  # Container-only: a legacy native layout must migrate before restoring
-  # onto it (the upgrade cliff, container/ROADMAP.md).
   local root
   root="$(content_root)"
-  if [[ "$root" != "$DATA_DIR" ]]; then
-    die "this machine still has the legacy native layout — migrate first:
-  $0 migrate --keep-legacy
-then re-run: $0 restore FILE"
-  fi
   need_docker
+  check_legacy_layout
   if ! docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1; then
     log "No container image — building first"
     cmd_container_build
@@ -1134,26 +1100,20 @@ then re-run: $0 restore FILE"
 }
 
 # =============================================================================
-#  container (EXPERIMENTAL) — the containerized runtime, phase 1
+#  the containerized runtime
 # =============================================================================
 # The image holds everything reproducible (ComfyUI at a pinned commit, venv
 # with cu130 torch, native sm_121 SageAttention, GPU onnxruntime, build-time
-# mods); the USER_CONTENT set is bind-mounted from this install's tree, so
-# native and container runs share models/workflows/custom nodes. The build
-# has no GPU, so the live kernel gates run in the container entrypoint on
-# every start (container/entrypoint.sh), not at build time.
+# mods); the USER_CONTENT set is bind-mounted from data/. The build has no
+# GPU, so the live kernel gates run in the container entrypoint on every
+# start (container/entrypoint.sh), not at build time.
 
-# Mount resolution (container/ROADMAP.md is the contract). Per entry, first
-# match wins:
-#   1. a spark-mounts.conf key
-#   2. the legacy native tree (INSTALL_DIR has a .git and data/ is absent):
-#      transition support so a native install keeps working until 'migrate'
-#   3. DATA_DIR/<entry> (the container-only default)
-# Fills RESOLVED_ENTRIES/RESOLVED_PATHS (parallel arrays), EXTRA_MOUNTS
-# (HOST:CONTAINER[:ro] strings, validated), and MOUNTS_LEGACY=1 when the
-# legacy fallback is active.
+# Mount resolution (container/ROADMAP.md is the contract). Per entry: a
+# spark-mounts.conf key wins, else DATA_DIR/<entry>. Fills
+# RESOLVED_ENTRIES/RESOLVED_PATHS (parallel arrays) and EXTRA_MOUNTS
+# (HOST:CONTAINER[:ro] strings, validated).
 resolve_mounts() {
-  RESOLVED_ENTRIES=() RESOLVED_PATHS=() EXTRA_MOUNTS=() MOUNTS_LEGACY=0
+  RESOLVED_ENTRIES=() RESOLVED_PATHS=() EXTRA_MOUNTS=()
   local -A conf=()
   local line key val known entry
   if [[ -f "$MOUNTS_CONF" ]]; then
@@ -1190,17 +1150,30 @@ container path under /opt/ComfyUI — got: '$val'"
       conf["$key"]="$val"
     done < "$MOUNTS_CONF"
   fi
-  [[ ! -d "$DATA_DIR" && -d "$INSTALL_DIR/.git" ]] && MOUNTS_LEGACY=1
   for entry in "${USER_CONTENT[@]}"; do
     RESOLVED_ENTRIES+=("$entry")
     if [[ -n "${conf[$entry]:-}" ]]; then
       RESOLVED_PATHS+=("${conf[$entry]}")
-    elif [[ "$MOUNTS_LEGACY" == 1 ]]; then
-      RESOLVED_PATHS+=("$INSTALL_DIR/$entry")
     else
       RESOLVED_PATHS+=("$DATA_DIR/$entry")
     fi
   done
+}
+
+# A native-era layout (pre-v2026.07.20) has a ComfyUI checkout where data/
+# should be. The migration tooling shipped in v2026.07.20 only; point
+# there instead of carrying it forever. Without this gate, install would
+# create an empty data/ and silently shadow the user's content.
+check_legacy_layout() {
+  [[ -d "$BASE_DIR/ComfyUI/.git" && ! -d "$DATA_DIR" ]] || return 0
+  die "a native-era install layout was detected (ComfyUI checkout, no data/).
+This version no longer carries the migration tooling. Either migrate with
+the version that does:
+  git checkout v2026.07.20
+  $0 migrate --keep-legacy
+  git checkout main
+then re-run: $0 install
+Or stay native on the last native release: git checkout v2026.07.19"
 }
 
 # The single directory holding the whole USER_CONTENT set: the legacy
@@ -1211,15 +1184,14 @@ container path under /opt/ComfyUI — got: '$val'"
 # content.
 content_root() {
   resolve_mounts
-  local root i
-  if [[ "$MOUNTS_LEGACY" == 1 ]]; then root="$INSTALL_DIR"; else root="$DATA_DIR"; fi
+  local i
   for i in "${!RESOLVED_ENTRIES[@]}"; do
-    [[ "${RESOLVED_PATHS[$i]}" == "$root/${RESOLVED_ENTRIES[$i]}" ]] \
+    [[ "${RESOLVED_PATHS[$i]}" == "$DATA_DIR/${RESOLVED_ENTRIES[$i]}" ]] \
       || die "backup/restore do not support per-entry mount overrides yet:
-${RESOLVED_ENTRIES[$i]} resolves to ${RESOLVED_PATHS[$i]} (outside $root).
+${RESOLVED_ENTRIES[$i]} resolves to ${RESOLVED_PATHS[$i]} (outside $DATA_DIR).
 Remove the override from $MOUNTS_CONF for this operation."
   done
-  echo "$root"
+  echo "$DATA_DIR"
 }
 
 seed_mounts_conf() {
@@ -1245,118 +1217,6 @@ seed_mounts_conf() {
 # mount = /mnt/nas/sdxl-models:/opt/ComfyUI/models/nas:ro
 EOF
   info "seeded mount config template: $MOUNTS_CONF"
-}
-
-# One-time move of a legacy native install's user content into data/
-# (container/ROADMAP.md). Same-filesystem renames, so instant even for a
-# models directory of tens of GB. Idempotent and resumable.
-cmd_migrate() {
-  local keep=0 yes=0 arg
-  for arg in "$@"; do
-    case "$arg" in
-      --keep-legacy) keep=1 ;;
-      --yes)         yes=1 ;;
-      *) die "Unknown migrate option: $arg (valid: --keep-legacy --yes)" ;;
-    esac
-  done
-  if [[ ! -d "$INSTALL_DIR/.git" ]]; then
-    info "no legacy native install at $INSTALL_DIR — nothing to migrate"
-    return 0
-  fi
-  log "Migrating user content: $INSTALL_DIR -> $DATA_DIR"
-  mkdir -p "$DATA_DIR"
-  local entry src dst moved=0
-  for entry in "${USER_CONTENT[@]}"; do
-    src="$INSTALL_DIR/$entry" dst="$DATA_DIR/$entry"
-    [[ -e "$src" ]] || continue
-    if [[ -e "$dst" ]]; then
-      # A checkout kept by an earlier 'migrate --keep-legacy' has stock
-      # tracked skeletons here (websocket_image_save.py, models/configs).
-      # Fully tracked content is reproducible, not the user's: skip it so
-      # the promised delete-later re-run works. ls-files --others is used
-      # WITHOUT --exclude-standard on purpose — ComfyUI's own .gitignore
-      # covers the model dirs, and an ignored user model is still user
-      # content, never "stock".
-      if [[ -z "$(git -C "$INSTALL_DIR" ls-files --others -- "$entry" 2>/dev/null)" \
-            && -n "$(git -C "$INSTALL_DIR" ls-files -- "$entry" 2>/dev/null)" ]]; then
-        echo "  $entry: only stock tracked files left in the checkout — skipped"
-        continue
-      fi
-      die "both $src and $dst exist — deciding which copy is yours is not this
-script's call. Reconcile the two manually, then re-run: $0 migrate"
-    fi
-    mv "$src" "$dst"
-    echo "  moved $entry"
-    moved=1
-  done
-  [[ "$moved" == 1 ]] || echo "  (content already in $DATA_DIR)"
-  # Retire the native systemd service if present: the container world uses
-  # docker's restart policy instead ($0 service). Unit dir is the one legit
-  # $HOME use (golden rule 2).
-  if systemctl --user is-enabled comfyui.service >/dev/null 2>&1; then
-    systemctl --user disable --now comfyui.service 2>/dev/null || true
-    rm -f "$HOME/.config/systemd/user/comfyui.service"
-    systemctl --user daemon-reload 2>/dev/null || true
-    echo "  retired the native systemd service (container equivalent: $0 service)"
-  fi
-  if [[ "$keep" == 1 ]]; then
-    # Restore the stock tracked skeletons (websocket_image_save.py,
-    # models/configs/*) so the kept checkout stays clean for git. Per
-    # entry, not one command: git checkout with multiple pathspecs fails
-    # wholesale if any single one matches nothing in the index (e.g. a
-    # never-tracked extra_model_paths.yaml), restoring nothing at all.
-    for entry in "${USER_CONTENT[@]}"; do
-      git -C "$INSTALL_DIR" checkout -q -- "$entry" 2>/dev/null || true
-    done
-    log "Done. Legacy install kept (checkout, venv, SageAttention)."
-    echo "  Delete it later by re-running without --keep-legacy."
-  else
-    # Everything left in these trees is reproducible (checkout, venv, Sage
-    # build); user content moved above. Wipe guard, same spirit as reset:
-    # no UNTRACKED file may remain under any USER_CONTENT entry (tracked
-    # stock skeletons are reproducible and fine to delete).
-    for entry in "${USER_CONTENT[@]}"; do
-      [[ -e "$INSTALL_DIR/$entry" ]] || continue
-      [[ -z "$(git -C "$INSTALL_DIR" ls-files --others -- "$entry" 2>/dev/null)" ]] \
-        || die "wipe guard: untracked files remain under $INSTALL_DIR/$entry — aborting before rm"
-    done
-    if [[ "$yes" != 1 ]]; then
-      [[ -t 0 ]] || die "stdin is not a terminal — re-run with: $0 migrate --yes"
-      echo
-      echo "  About to DELETE the native install (all reproducible, ~15-20 GB):"
-      echo "    $INSTALL_DIR"
-      echo "    $VENV_DIR"
-      echo "    $SAGE_SRC"
-      echo "  Your content is safe in: $DATA_DIR"
-      read -r -p "  Proceed? [y/N] " arg
-      [[ "$arg" == y || "$arg" == Y ]] || die "aborted — nothing deleted (re-run with --keep-legacy to keep the native tree)"
-    fi
-    cd "$BASE_DIR"
-    rm -rf "$INSTALL_DIR" "$VENV_DIR" "$SAGE_SRC"
-    log "Done. Native install removed; content lives in $DATA_DIR."
-  fi
-  echo "  Launch: $0 container run"
-}
-
-# The upgrade cliff (container/ROADMAP.md): self-update lands this
-# container-only version on machines still running the native layout.
-# Refuse to install/update over a layout this version no longer manages,
-# and name the way forward instead of silently doing something different
-# from what the user asked for.
-check_legacy_layout() {
-  resolve_mounts
-  [[ "$MOUNTS_LEGACY" == 1 ]] || return 0
-  die "this version of spark-comfyui is container-only, and this machine still
-has the native layout (ComfyUI checkout + venv, no data/).
-
-Option 1 — migrate (recommended; content moves by instant rename):
-  $0 migrate --keep-legacy   # move models/workflows/nodes into data/
-  $0 install                 # one-time image build (10-30 min)
-  $0 run
-  (later, to reclaim ~15-20 GB: $0 migrate)
-
-Option 2 — stay native on the last native release:
-  git -C $BASE_DIR checkout legacy"
 }
 
 need_docker() {
@@ -1414,8 +1274,6 @@ _container_run_args() {
   docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1 \
     || die "image $CONTAINER_IMAGE:latest not found — run: $0 container build"
   resolve_mounts
-  [[ "$MOUNTS_LEGACY" == 1 ]] \
-    && info "legacy layout: mounting from the native ComfyUI tree ('$0 migrate' moves content to data/)"
   CRUN_ARGS=(
     --name "$CONTAINER_NAME"
     --gpus all
@@ -1669,8 +1527,6 @@ the update: $0 container stop && $0 container run"
   echo
   echo "== configured mounts (resolved) =="
   resolve_mounts
-  [[ "$MOUNTS_LEGACY" == 1 ]] \
-    && info "legacy layout: content still in the native ComfyUI tree ('$0 migrate' moves it to data/)"
   local ci
   for ci in "${!RESOLVED_ENTRIES[@]}"; do
     printf '%s\t%s\n' "${RESOLVED_ENTRIES[$ci]}" "${RESOLVED_PATHS[$ci]}"
@@ -1879,7 +1735,6 @@ case "$CMD" in
   backup)   cmd_backup "$@" ;;
   restore)  cmd_restore "$@" ;;
   reset)    cmd_container_reset "$@" ;;
-  migrate)  cmd_migrate "$@" ;;
   shell)    cmd_container_shell ;;
   # --- hidden backward-compat aliases (old command spellings still work) ---
   container) cmd_container "$@" ;;
@@ -1888,5 +1743,5 @@ case "$CMD" in
   rollback) cmd_container_update --rollback ;;
   ""|-h|--help|help) usage ;;
   -v|--version|version) echo "spark-comfyui $VERSION" ;;
-  *) die "Unknown command: $CMD (try: install | run | service | stop | update | doctor | status | tune | backup | restore | reset | migrate)" ;;
+  *) die "Unknown command: $CMD (try: install | run | service | stop | update | doctor | status | tune | backup | restore | reset)" ;;
 esac

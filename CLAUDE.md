@@ -26,12 +26,12 @@ touch the host).
 
 Author/owner: GitHub `bjarkebolding`. Target repo name: `spark-comfyui`.
 Hardware in use: DGX Spark, hostname `sparky`. Development home:
-`~/projects/spark-comfyui` (remotes: `origin` GitHub, `live` the legacy
-checkout at `~/spark-comfyui`, still holding the production content
-pre-migration). Published: https://github.com/bjarkebolding/spark-comfyui.
-Current version: **2026.07.20**, the container-only release. Branch
-`legacy` (pushed) points at v2026.07.19, the last native release,
-maintained for fixes only. MIT licensed, shellcheck-clean.
+`~/projects/spark-comfyui` (sole remote: `origin` GitHub; the old native
+install was deleted 2026-07-20 and content starts from a blank slate).
+Published: https://github.com/bjarkebolding/spark-comfyui.
+Current version: **2026.07.20.1**. No legacy branch: the last native
+release is reachable as the v2026.07.19 tag, and the migration tooling
+lives in the v2026.07.20 tag only. MIT licensed, shellcheck-clean.
 
 ## Versioning and releasing
 
@@ -78,9 +78,9 @@ VERSION in the same push.** Docs-only pushes need no bump.
 ## Repository layout
 
 ```
-spark-comfyui.sh          # The entry point: ~1900 lines. Host-side
+spark-comfyui.sh          # The entry point: ~1750 lines. Host-side
                           # lifecycle (docker orchestration, mounts,
-                          # migrate, backup/restore, status/watch, tune).
+                          # backup/restore, status/watch, tune).
 container/
   Dockerfile              # 4 named stages: base / torch / sage / final.
                           # Everything reproducible bakes in here.
@@ -108,28 +108,29 @@ README.md LICENSE .gitignore .dockerignore CLAUDE.md
 The docker image (`spark-comfyui:latest`, ~22 GB) and the cache volume
 (`spark-comfyui-cache`: pip downloads + compiled sm_121 kernels) live in
 docker's storage, not the repo dir. `backup` writes to `backups/`
-(gitignored). Legacy trees (`ComfyUI/`, `comfyui-env/`, `SageAttention/`)
-exist only on not-yet-migrated installs.
+(gitignored).
 
 ## Commands (dispatch at the bottom of the script)
 
 `install` · `run [args]` · `service [--disable]` · `stop` ·
 `update [--torch|--rollback]` · `doctor` · `status [--watch [SEC]]` ·
 `tune [--clock-cap MHZ] [--persist]` · `backup [--with-output] [FILE]` ·
-`restore FILE` · `reset [--yes]` · `migrate [--keep-legacy] [--yes]` ·
-`shell` · `--version`. Hidden aliases: the `container <verb>` spellings
-from the dev phase, `verify` (doctor), `monitor` (status --watch),
-`rollback` (update --rollback).
+`restore FILE` · `reset [--yes]` · `shell` · `--version`. Hidden
+aliases: the `container <verb>` spellings from the dev phase, `verify`
+(doctor), `monitor` (status --watch), `rollback` (update --rollback).
 
 Mental model, also printed in `--help`: install once (image build), then
 run or service; update now and then (cached rebuild + `:previous`
 rollback point); something feels wrong, run doctor. `update` self-updates
 the tool first (`self_update`: ff-only pull, re-exec once;
 `SELF_UPDATE_RESUME` makes the re-exec land back in the container
-update). `install` and `update` refuse to run on a legacy native layout
-(`check_legacy_layout`, the upgrade cliff) and print the migrate/legacy
-instructions instead; `run` and `backup` keep working there via the
-legacy mount fallback until the user migrates.
+update). `install`, `update` and `restore` refuse to run over a
+native-era layout (`check_legacy_layout`: a ComfyUI checkout where data/
+should be) and point at the v2026.07.20 tag, which is where the migrate
+tooling lives, or the v2026.07.19 tag to stay native. The legacy mount
+fallback, the migrate command and the legacy branch were removed in
+2026.07.20.1; without the gate, install would create an empty data/ and
+silently shadow a native user's content.
 
 ## The mod system (most important architecture)
 
@@ -247,52 +248,40 @@ it is a tag on the sm-clk row now. GB10 nvidia-smi N/A fields: `clocks.mem`,
 `fan.speed`, `temperature.memory`, `power.limit` (and `nvidia-smi -pl` does
 not work, hence `tune --clock-cap`).
 
-## reset / backup / restore / migrate
+## reset / backup / restore
 
 One shared definition of "user content": the readonly `USER_CONTENT` array
 (`models user input output custom_nodes extra_model_paths.yaml`), resolved
-to host paths by `resolve_mounts` (see the containerization section).
-`content_root` returns the single directory holding the whole set (data/
-or, pre-migration, the legacy checkout) and dies loudly on per-entry
-spark-mounts.conf overrides — backup/restore do not support scattered
-roots yet, and half a backup must never look like a whole one.
+to host paths by `resolve_mounts` (a spark-mounts.conf key wins, else
+`DATA_DIR/<entry>`). `content_root` returns `DATA_DIR` after verifying no
+per-entry override scatters the set — backup/restore do not support
+scattered roots yet, and half a backup must never look like a whole one.
 
 **reset (`cmd_container_reset`)**: content is outside the image by design,
 so reset only removes what is reproducible: the container, every image
 tag, the cache volume, then rebuilds with `--no-cache`. `data/` is never
-touched. The old native reset's hold-dir protocol, wipe guard and resume
-logic are gone (the legacy branch still carries them).
+touched.
 
-**backup (`cmd_backup`)**: unchanged in spirit: small tgz of meta,
-manifests, plain-node copies, config files; `user/`, `input/`, `output/`
-tarred from the live tree with `--ignore-failed-read` (exit 1 tolerated:
-safe while serving). The ComfyUI commit in `meta` comes from the checkout
-when one exists, else from the image label `org.spark-comfyui.comfy-sha`.
-Works on both layouts (it is read-only, so the legacy tree stays
-supported for pre-migration backups). Archive format unchanged
-(`format=1`), so old backups restore fine.
+**backup (`cmd_backup`)**: small tgz of meta, manifests, plain-node
+copies, config files; `user/`, `input/`, `output/` tarred from the live
+tree with `--ignore-failed-read` (exit 1 tolerated: safe while serving).
+The ComfyUI commit in `meta` comes from the image label
+`org.spark-comfyui.comfy-sha`. Archive format unchanged (`format=1`), so
+native-era backups restore fine.
 
-**restore (`cmd_restore`)**: container-layout only; on a legacy layout it
-dies and points at `migrate`. Order: unpack + `format=1` check; build the
-image if missing; `container stop`; merge `user/`/`input/`/`output/` into
-the content root; restore config files (live copies saved aside as
-`.bak`); custom nodes (plain copies, then manifest clones with detached
-checkout, prompt-proofed); models manifest diffed against disk with sizes.
-NO pip step and no mod pass: the entrypoint installs every node's
-requirements and verifies torch on each start, so a restore is
-content-only by construction.
+**restore (`cmd_restore`)**: unpack + `format=1` check; the legacy gate
+(see Commands) fires before anything else; build the image if missing;
+`container stop`; merge `user/`/`input/`/`output/` into data/; restore
+config files (live copies saved aside as `.bak`); custom nodes (plain
+copies, then manifest clones with detached checkout, prompt-proofed);
+models manifest diffed against disk with sizes. NO pip step and no mod
+pass: the entrypoint installs every node's requirements and verifies
+torch on each start, so a restore is content-only by construction.
 
-**migrate (`cmd_migrate [--keep-legacy] [--yes]`)**: one-time move of the
-`USER_CONTENT` set from a legacy checkout into `data/` by same-filesystem
-rename. Collision rule: an entry existing on both sides dies UNLESS the
-checkout side is 100 percent git-tracked (stock skeletons restored by an
-earlier `--keep-legacy` run); trackedness is checked with `git ls-files
---others` WITHOUT `--exclude-standard`, because ComfyUI's own .gitignore
-covers the model dirs and an ignored user model is still user content.
-`--keep-legacy` restores the stock tracked skeletons per entry
-(multi-pathspec checkout fails wholesale on one bad pathspec). The
-delete pass re-checks that no untracked file remains under any entry
-before `rm -rf`. Also retires the old native systemd unit. Idempotent.
+**migrate**: removed in 2026.07.20.1. The tooling (content moves by
+git-trackedness-aware rename, stock-skeleton handling, systemd
+retirement) lives permanently in the v2026.07.20 tag, which is exactly
+where `check_legacy_layout` sends native-era users.
 
 **doctor**: an info line names the newest `backups/spark-backup-*.tgz`
 and its age, or that none exists. Only knows the default `backups/` dir.
@@ -374,15 +363,15 @@ and its age, or that none exists. Only knows the default `backups/` dir.
 
 `container/ROADMAP.md` is the decided architecture document and phase log;
 read it before re-deriving any of this. The cut (phase 3d) is complete on
-`container-dev`: the native path is deleted from the script, branch
-`legacy` (local) points at the last native release.
+`container-dev`: the native path is deleted from the script; the last
+native release is reachable as the v2026.07.19 tag.
 
 Split: the image holds everything reproducible (ComfyUI at a pinned commit,
 venv with cu130 torch, native sm_121 SageAttention at SAGE_REF, the
 sha256-pinned onnxruntime wheel, build-time mods 05+10 applied via
 container/build-mods.sh reusing the mods/ contract). The USER_CONTENT set is
-bind-mounted per the resolution contract (spark-mounts.conf > legacy tree >
-data/; `resolve_mounts` implements it, `status` prints it). A named
+bind-mounted per the resolution contract (a spark-mounts.conf key wins,
+else data/; `resolve_mounts` implements it, `status` prints it). A named
 volume `spark-comfyui-cache` at /home/comfy/.cache carries pip downloads and
 compiled sm_121 kernels across container recreation (CUDA_CACHE_PATH points
 into it); the mountpoint must exist in the image owned by comfy (uid 1000)
@@ -446,8 +435,6 @@ backup/restore (content_root's single-root rule).
 - `DATA_DIR` (content root, default `data/` next to the script),
   `MOUNTS_CONF` (default `spark-mounts.conf`), `CONTAINER_IMAGE`,
   `CONTAINER_NAME` (both default `spark-comfyui`)
-- `INSTALL_DIR`, `VENV_DIR`, `SAGE_SRC`: legacy-tree locations, used by
-  `migrate` and the legacy mount fallback only
 - `REPO_URL`, `PORT`, `TORCH_INDEX`, `ORT_WHEEL_URL`, `PATCH_LIST`,
   `MODS_DIR` (all become build args or run-time wiring)
 - `SAGE_REF`: pinned SageAttention commit, see GB10 domain knowledge
@@ -458,7 +445,9 @@ backup/restore (content_root's single-root rule).
 - Gone since the cut: `SPARK_SOURCE_PATCHES` (the host-side mod pass it
   toggled no longer exists; mods apply at image build and in the
   entrypoint), `PIP_RETRIES`/`PIP_DEFAULT_TIMEOUT` as user knobs (pip runs
-  inside the build/container).
+  inside the build/container). Gone since 2026.07.20.1: `INSTALL_DIR`,
+  `VENV_DIR`, `SAGE_SRC` (legacy-tree locations; the migrate tooling that
+  used them lives in the v2026.07.20 tag).
 
 ## Patch list (separate from mods)
 
@@ -621,6 +610,17 @@ dry-run the transform on a fixture and `ast.parse` the result first.
   bit-identical. Developed as phases 1-3d on container-dev, each
   field-verified on the GB10; details in container/ROADMAP.md and the
   phase commits.
+- **2026.07.20.1**: legacy cleanup. The migrate command, the legacy mount
+  fallback, the legacy content-root support in backup/restore, the native
+  systemd branch in stop, and the INSTALL_DIR/VENV_DIR/SAGE_SRC vars are
+  removed (145 lines), and the legacy branch is deleted from GitHub (the
+  last native release stays reachable as the v2026.07.19 tag).
+  check_legacy_layout stays as a slim detector that refuses
+  install/update/restore over a native-era layout and points at the
+  v2026.07.20 tag (where migrate lives permanently) or the v2026.07.19
+  tag — without it, install would create an empty data/ and silently
+  shadow a native user's content. Suite rewritten (15 assertions), fresh
+  blank-slate launch field-verified.
 
 ## Release checklist (repeat per release)
 

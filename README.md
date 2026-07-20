@@ -19,7 +19,7 @@ cd spark-comfyui
 
 Models go in `data/models/checkpoints` (etc.). No venv, no system Python changes; `sudo` is only invoked by `tune` for host settings. Deep GB10 details live in [CLAUDE.md](CLAUDE.md) and [mods/README.md](mods/README.md).
 
-Coming from the native (pre-container) version? See [Migrating](#migrating-from-the-native-version).
+Coming from the native (pre-container) version? See [Migrating](#migrating-from-the-native-version) — the tooling lives in the `v2026.07.20` tag.
 
 ## Commands
 
@@ -28,7 +28,7 @@ Coming from the native (pre-container) version? See [Migrating](#migrating-from-
 | `install` | Checks docker + the NVIDIA runtime, seeds the config templates, builds the image: ComfyUI at a pinned commit, cu130 PyTorch, SageAttention compiled natively for sm_121, the community GPU onnxruntime wheel (sha256-pinned), and the GB10 mods baked in. Re-running refreshes rather than breaks. |
 | `run [args...]` | Starts ComfyUI in the container, foreground (Ctrl-C stops). Every start re-installs custom-node requirements, verifies torch sees the GPU, and runs a live SageAttention kernel test before serving — a broken stack refuses to launch instead of degrading silently. Extra args pass to `main.py`. |
 | `service [--disable]` | Same, detached with a docker restart policy: survives crashes and reboots. `--disable` removes it. |
-| `stop` | Stops ComfyUI (container, service, or a stray native process). |
+| `stop` | Stops ComfyUI (container, service, or a stray process). |
 | `update [--torch] [--rollback]` | Self-updates spark-comfyui itself first, then rebuilds the image on current ComfyUI master. Docker layer caching makes a routine update minutes, not a full build. The replaced image stays tagged `:previous`; `--rollback` swaps back to it instantly. `--torch` forces fresh cu130 wheels (SageAttention rebuilds on top). |
 | `doctor` | Health check in three layers: the tool itself (version, pending update, backup age), the host (driver, docker runtime, image age, a running container on an outdated image, swap), and the live GPU gates — torch CUDA, the sm_121 SageAttention kernel, the onnxruntime GPU provider, and a forced NVFP4 quantize+matmul — executed inside a throwaway container from the exact image `run` uses. Every failure names its fix. |
 | `status [--watch [SEC]]` | One-page glance: process (tagged when containerized), GPU, memory, image commit, resolved mounts. `--watch` opens the live dashboard: heat-colored sparkline timeseries, rows that appear only when they carry information, generation telemetry from ComfyUI's own API, and a `session:` summary line made for A/B testing. Every sample lands in `thermal_monitor.log` — the post-mortem evidence for silent hard-reboots. |
@@ -36,7 +36,6 @@ Coming from the native (pre-container) version? See [Migrating](#migrating-from-
 | `backup [--with-output] [FILE]` | Small tgz of the hand-made state: workflows, settings, inputs, config files, the custom-node set (git nodes as pinned manifest entries, plain nodes copied whole), and a manifest of every model file. Models are never archived. Safe while ComfyUI runs. |
 | `restore FILE` | Rebuilds from a backup: builds the image if missing, merges content into `data/`, re-clones custom nodes at their pinned commits (their requirements install at next start), then lists exactly which model files are missing and their sizes. |
 | `reset [--yes]` | The nuclear option, now content-safe by construction: removes the container, every image tag and the cache volume, then rebuilds the image from scratch. `data/` is never touched. |
-| `migrate [--keep-legacy] [--yes]` | One-time move from the old native layout into `data/` (same-filesystem renames, instant even for 74 GB of models). Without `--keep-legacy` it also deletes the old checkout, venv and SageAttention tree (~15-20 GB, all reproducible) after confirming. |
 
 `./spark-comfyui.sh help` prints the full reference; `--version` prints the version.
 
@@ -205,17 +204,19 @@ Moving to a new Spark: clone spark-comfyui there, copy the backup archive, rsync
 
 ## Migrating from the native version
 
-If you installed spark-comfyui before the container era (a `ComfyUI/` checkout and a `comfyui-env/` venv next to the script), one command moves your content and one builds the image:
+If you installed spark-comfyui before the container era (a `ComfyUI/` checkout and a `comfyui-env/` venv next to the script), the migration tooling lives in the `v2026.07.20` tag. `install` and `update` detect the old layout and stop with these exact instructions:
 
 ```bash
+git checkout v2026.07.20
 ./spark-comfyui.sh migrate --keep-legacy   # content -> data/, instant renames
+git checkout main
 ./spark-comfyui.sh install                 # one-time image build
 ./spark-comfyui.sh run
 ```
 
-When you are satisfied, reclaim ~15-20 GB: `./spark-comfyui.sh migrate` deletes the old checkout, venv and SageAttention tree (all reproducible; your content is already in `data/`). `migrate` also retires the old systemd service — `service` now uses a docker restart policy instead.
+The `migrate` in that tag can also delete the old checkout, venv and SageAttention tree afterward (run it again without `--keep-legacy`, reclaims ~15-20 GB).
 
-To stay on the last native version instead: `git checkout legacy`. That branch gets fixes only, no new features.
+To stay on the last native version instead: `git checkout v2026.07.19`, the last native release.
 
 ## Patch list (optional)
 
