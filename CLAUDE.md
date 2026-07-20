@@ -29,11 +29,9 @@ Hardware in use: DGX Spark, hostname `sparky`. Development home:
 `~/projects/spark-comfyui` (remotes: `origin` GitHub, `live` the legacy
 checkout at `~/spark-comfyui`, still holding the production content
 pre-migration). Published: https://github.com/bjarkebolding/spark-comfyui.
-Current released version: **2026.07.19** (the last native release; branch
-`legacy` points at it). The container-only cut on `container-dev` is
-complete and field-verified but UNRELEASED — nothing container-related is
-pushed to GitHub yet, and the branch deliberately has no upstream so a
-bare `git push` errors. MIT licensed, shellcheck-clean.
+Current version: **2026.07.20**, the container-only release. Branch
+`legacy` (pushed) points at v2026.07.19, the last native release,
+maintained for fixes only. MIT licensed, shellcheck-clean.
 
 ## Versioning and releasing
 
@@ -438,11 +436,10 @@ production workflow extracted from an output PNG's embedded API prompt,
 POSTed to /prompt with a fixed seed sequence, watch running. The cut (3d)
 removed the native path (972 lines), gated the upgrade cliff
 (check_legacy_layout in install/update), created the local `legacy`
-branch at v2026.07.19, and rewrote README and this file. PENDING: the
-release itself (merge to main, VERSION bump, tag, push, GitHub Release,
-push the legacy branch, forum post). Phase 4 unchanged (slimming, GHCR,
-rootless, read-only rootfs) plus one new item: per-entry mount-override
-support in backup/restore (content_root's single-root rule).
+branch at v2026.07.19, and rewrote README and this file. RELEASED as
+v2026.07.20 (2026-07-20). Phase 4 unchanged (slimming, GHCR, rootless,
+read-only rootfs) plus one new item: per-entry mount-override support in
+backup/restore (content_root's single-root rule).
 
 ## Env var overrides
 
@@ -609,6 +606,21 @@ dry-run the transform on a fixture and `ast.parse` the result first.
   host driver could not initialize CUDA; doctor's failure text no longer
   guesses "a custom node re-pinned it". All four diag branches exercised
   live on the GB10.
+- **2026.07.20**: THE CONTAINER RELEASE. spark-comfyui is container-only:
+  the whole stack (ComfyUI at a pinned commit, cu130 torch, native sm_121
+  SageAttention, sha256-pinned GPU onnxruntime, the mods) bakes into a
+  docker image; content lives in data/ with spark-mounts.conf overrides;
+  custom-node code runs confined (non-root, cap-drop ALL,
+  no-new-privileges). update rebuilds on cached layers and keeps
+  :previous for atomic rollback; service uses a docker restart policy;
+  reset is content-safe by construction; doctor runs the live GPU gates
+  in a throwaway container. New migrate command; install/update refuse a
+  legacy layout with instructions; branch legacy = v2026.07.19 for
+  stay-native users. Cutover gate: native steady 13.59s vs container
+  13.61s on the production Krea-2 workflow, seed-matched outputs
+  bit-identical. Developed as phases 1-3d on container-dev, each
+  field-verified on the GB10; details in container/ROADMAP.md and the
+  phase commits.
 
 ## Release checklist (repeat per release)
 
