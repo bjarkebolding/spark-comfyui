@@ -57,7 +57,7 @@
 #                              inputs, outputs and custom nodes. The nuclear
 #                              option for when doctor's fixes don't stick.
 #    service                   Install + start a systemd user service.
-#    container build|run|stop|update|status|doctor|shell
+#    container install|build|run|service|stop|update|status|doctor|reset|shell
 #                              EXPERIMENTAL containerized runtime (the
 #                              roadmap; the native path above becomes
 #                              legacy once this matures). 'build' bakes an
@@ -77,6 +77,17 @@
 #                              Content mounts resolve via spark-mounts.conf
 #                              (seeded template) > legacy native tree >
 #                              data/ next to the script.
+#                              'install' is the container-world one-shot
+#                              setup (no venv, no sudo). 'service' runs it
+#                              detached with a docker restart policy
+#                              (survives reboots; --disable removes).
+#                              'update --torch' forces fresh cu130 wheels
+#                              (SageAttention rebuilds on top). 'reset'
+#                              removes images and cache and rebuilds from
+#                              scratch; content is never touched. backup
+#                              and restore work on both layouts (restore
+#                              on a container layout is content-only; the
+#                              entrypoint handles requirements and torch).
 #    migrate [--keep-legacy] [--yes]
 #                              One-time move of a native install's user
 #                              content (models, workflows, custom nodes,
@@ -254,12 +265,13 @@ the network and re-run: $0 update"
 # scratch every time so the result is reproducible. Conflicting entries are
 # skipped with a warning, already-merged entries are flagged for removal.
 # Sets: PATCHES_ACTIVE (0/1 any patch merged).
-apply_patches() {
-  PATCHES_ACTIVE=0
-  cd "$INSTALL_DIR"
-  # Seed a self-documenting template on first run (all comments = empty list).
-  if [[ ! -f "$PATCH_LIST" ]]; then
-    cat > "$PATCH_LIST" <<'TPL'
+# Seed a self-documenting patch-list template (all comments = empty list).
+# Called by the native apply_patches and by the container install; the
+# container build COPYs this file into the image and merges its entries
+# there (container/build-patches.sh).
+seed_patch_list() {
+  [[ -f "$PATCH_LIST" ]] && return 0
+  cat > "$PATCH_LIST" <<'TPL'
 # comfyui-patches.list — PRs/branches merged on top of upstream master on
 # every install/update (rebuilt fresh each time on the 'spark-patched'
 # branch; master stays pristine). Formats:
@@ -274,8 +286,13 @@ apply_patches() {
 # unreviewed; features are opt-in via: run --fast-mmap-load --cuda-uma):
 # remote:https://github.com/stardust7700/ComfyUI.git master
 TPL
-    echo "Seeded patch-list template: $PATCH_LIST (empty — all comments)"
-  fi
+  echo "Seeded patch-list template: $PATCH_LIST (empty — all comments)"
+}
+
+apply_patches() {
+  PATCHES_ACTIVE=0
+  cd "$INSTALL_DIR"
+  seed_patch_list
   if ! grep -qE '^[^#[:space:]]' "$PATCH_LIST"; then
     return 0   # no patches requested -> stay on the base branch
   fi
@@ -1545,12 +1562,27 @@ cmd_backup() {
           out="$1"; shift ;;
     esac
   done
-  [[ -d "$INSTALL_DIR/.git" ]] || die "no install at $INSTALL_DIR — run: $0 install"
+  # Content root: the legacy checkout or data/ (container-only layout).
+  local root
+  root="$(content_root)"
+  [[ -d "$root" ]] || die "no content at $root — nothing to back up"
   if [[ -z "$out" ]]; then
     mkdir -p "$BASE_DIR/backups"
     out="$BASE_DIR/backups/spark-backup-$(date +%Y%m%d-%H%M%S).tgz"
   fi
   case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
+
+  # The ComfyUI commit: from the checkout when one exists, else from the
+  # image label (container-only hosts have no checkout).
+  local ccommit
+  if [[ -d "$INSTALL_DIR/.git" ]]; then
+    ccommit="$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+  else
+    ccommit="$(docker image inspect \
+      -f '{{index .Config.Labels "org.spark-comfyui.comfy-sha"}}' \
+      "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
+    [[ -n "$ccommit" ]] || ccommit=unknown
+  fi
 
   log "Staging backup"
   local stage; stage="$(mktemp -d)"
@@ -1560,23 +1592,28 @@ cmd_backup() {
     echo "version=$VERSION"
     echo "date=$(date -Is)"
     echo "host=$(hostname)"
-    echo "comfyui_commit=$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+    echo "comfyui_commit=$ccommit"
   } > "$stage/meta"
 
   [[ -f "$PATCH_LIST" ]] && cp -a "$PATCH_LIST" "$stage/comfyui-patches.list"
-  [[ -f "$INSTALL_DIR/extra_model_paths.yaml" ]] \
-    && cp -a "$INSTALL_DIR/extra_model_paths.yaml" "$stage/extra_model_paths.yaml"
+  [[ -f "$root/extra_model_paths.yaml" ]] \
+    && cp -a "$root/extra_model_paths.yaml" "$stage/extra_model_paths.yaml"
 
   # Custom nodes: git clones become manifest lines (url + commit, re-cloned on
   # restore); non-git entries are copied whole. "User-installed" = not tracked
   # by ComfyUI's own git (stock files like websocket_image_save.py are).
   : > "$stage/custom-nodes.manifest"
   local entry name url sha
-  if [[ -d "$INSTALL_DIR/custom_nodes" ]]; then
+  if [[ -d "$root/custom_nodes" ]]; then
     while IFS= read -r entry; do
       name="$(basename "$entry")"
       [[ "$name" == "__pycache__" ]] && continue
-      [[ -z "$(git -C "$INSTALL_DIR" ls-files "custom_nodes/$name" 2>/dev/null)" ]] || continue
+      # Stock-file exclusion needs the checkout's git; on a container-only
+      # host the stock files live as plain files in data/custom_nodes and
+      # ride along as tiny plain copies — harmless.
+      if [[ -d "$INSTALL_DIR/.git" ]]; then
+        [[ -z "$(git -C "$INSTALL_DIR" ls-files "custom_nodes/$name" 2>/dev/null)" ]] || continue
+      fi
       if [[ -d "$entry/.git" ]]; then
         url="$(git -C "$entry" remote get-url origin 2>/dev/null || echo unknown)"
         sha="$(git -C "$entry" rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -1585,12 +1622,12 @@ cmd_backup() {
         mkdir -p "$stage/custom_nodes_plain"
         cp -a "$entry" "$stage/custom_nodes_plain/$name"
       fi
-    done < <(find "$INSTALL_DIR/custom_nodes" -mindepth 1 -maxdepth 1 2>/dev/null)
+    done < <(find "$root/custom_nodes" -mindepth 1 -maxdepth 1 2>/dev/null)
   fi
 
   # Models are manifested (size + relative path), never copied.
-  if [[ -d "$INSTALL_DIR/models" ]]; then
-    find "$INSTALL_DIR/models" -type f -printf '%s\t%P\n' | sort -k2 > "$stage/models.manifest"
+  if [[ -d "$root/models" ]]; then
+    find "$root/models" -type f -printf '%s\t%P\n' | sort -k2 > "$stage/models.manifest"
   else
     : > "$stage/models.manifest"
   fi
@@ -1603,12 +1640,12 @@ cmd_backup() {
   [[ -f "$stage/comfyui-patches.list" ]]   && members+=(comfyui-patches.list)
   [[ -f "$stage/extra_model_paths.yaml" ]] && members+=(extra_model_paths.yaml)
   [[ -d "$stage/custom_nodes_plain" ]]     && members+=(custom_nodes_plain)
-  members+=(-C "$INSTALL_DIR")
-  [[ -d "$INSTALL_DIR/user" ]] && members+=(user)
-  [[ -d "$INSTALL_DIR/input" ]] \
-    && [[ -n "$(find "$INSTALL_DIR/input" -mindepth 1 -print -quit)" ]] \
+  members+=(-C "$root")
+  [[ -d "$root/user" ]] && members+=(user)
+  [[ -d "$root/input" ]] \
+    && [[ -n "$(find "$root/input" -mindepth 1 -print -quit)" ]] \
     && members+=(input)
-  [[ "$with_output" -eq 1 && -d "$INSTALL_DIR/output" ]] && members+=(output)
+  [[ "$with_output" -eq 1 && -d "$root/output" ]] && members+=(output)
   local rc=0
   tar -czf "$out" --exclude='__pycache__' --exclude='*.log' \
     --ignore-failed-read "${members[@]}" || rc=$?
@@ -1636,22 +1673,36 @@ cmd_restore() {
     || die "not a spark-comfyui backup (meta lacks format=1): $archive"
   sed 's/^/  /' "$stage/meta"
 
-  # Also self-heal a half-gutted machine (checkout present, venv missing):
-  # cmd_install is idempotent and refreshes whatever part is there.
-  if [[ ! -d "$INSTALL_DIR/.git" || ! -f "$VENV_DIR/bin/activate" ]]; then
-    log "No complete install (ComfyUI checkout + venv) — installing first"
-    cmd_install
+  # Layout decides the runtime heal: container-only restores need an image,
+  # legacy native restores need checkout + venv (cmd_install self-heals).
+  local root container_layout=0
+  root="$(content_root)"
+  [[ "$root" == "$DATA_DIR" ]] && container_layout=1
+  if [[ "$container_layout" == 1 ]]; then
+    need_docker
+    if ! docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1; then
+      log "No container image — building first"
+      cmd_container_build
+    fi
+    cmd_container_stop
+  else
+    # Also self-heal a half-gutted machine (checkout present, venv missing):
+    # cmd_install is idempotent and refreshes whatever part is there.
+    if [[ ! -d "$INSTALL_DIR/.git" || ! -f "$VENV_DIR/bin/activate" ]]; then
+      log "No complete install (ComfyUI checkout + venv) — installing first"
+      cmd_install
+    fi
+    activate_venv
+    log "Stopping ComfyUI (restoring over its live user/config files)"
+    cmd_stop
   fi
-  activate_venv
-  log "Stopping ComfyUI (restoring over its live user/config files)"
-  cmd_stop
 
   log "Merging user state"
   local d
   for d in user input output; do
     [[ -d "$stage/$d" ]] || continue
-    mkdir -p "$INSTALL_DIR/$d"
-    cp -a "$stage/$d/." "$INSTALL_DIR/$d/"
+    mkdir -p "$root/$d"
+    cp -a "$stage/$d/." "$root/$d/"
     echo "  merged $d/"
   done
   local src dst
@@ -1659,7 +1710,7 @@ cmd_restore() {
     src="$stage/$d"
     [[ -f "$src" ]] || continue
     case "$d" in
-      extra_model_paths.yaml) dst="$INSTALL_DIR/$d" ;;
+      extra_model_paths.yaml) dst="$root/$d" ;;
       comfyui-patches.list)   dst="$PATCH_LIST" ;;
       *) continue ;;   # a list entry without a case arm must not reuse $dst
     esac
@@ -1672,18 +1723,18 @@ cmd_restore() {
   done
 
   log "Restoring custom nodes"
-  mkdir -p "$INSTALL_DIR/custom_nodes"
+  mkdir -p "$root/custom_nodes"
   local entry name url sha ndir
   if [[ -d "$stage/custom_nodes_plain" ]]; then
     while IFS= read -r entry; do
       name="$(basename "$entry")"
-      if [[ -e "$INSTALL_DIR/custom_nodes/$name" ]]; then
+      if [[ -e "$root/custom_nodes/$name" ]]; then
         echo "  = $name (present)"
       else
-        cp -a "$entry" "$INSTALL_DIR/custom_nodes/$name"
+        cp -a "$entry" "$root/custom_nodes/$name"
         echo "  + $name (plain copy)"
-        if [[ -f "$INSTALL_DIR/custom_nodes/$name/requirements.txt" ]]; then
-          pip install -r "$INSTALL_DIR/custom_nodes/$name/requirements.txt" </dev/null \
+        if [[ "$container_layout" == 0 && -f "$root/custom_nodes/$name/requirements.txt" ]]; then
+          pip install -r "$root/custom_nodes/$name/requirements.txt" </dev/null \
             || warn "$name: pip install of its requirements failed — the node may not load"
         fi
       fi
@@ -1699,7 +1750,7 @@ cmd_restore() {
         .|..|*/*)
           warn "manifest names invalid node '$name' — skipped"; continue ;;
       esac
-      ndir="$INSTALL_DIR/custom_nodes/$name"
+      ndir="$root/custom_nodes/$name"
       if [[ -e "$ndir" ]]; then
         echo "  = $name (present)"
         continue
@@ -1717,16 +1768,22 @@ cmd_restore() {
          && ! git -C "$ndir" checkout -q "$sha" 2>/dev/null; then
         warn "$name: could not check out $sha — staying on clone HEAD"
       fi
-      if [[ -f "$ndir/requirements.txt" ]]; then
+      if [[ "$container_layout" == 0 && -f "$ndir/requirements.txt" ]]; then
         pip install -r "$ndir/requirements.txt" </dev/null \
           || warn "$name: pip install of its requirements failed — the node may not load"
       fi
     done < "$stage/custom-nodes.manifest"
   fi
 
-  # Node pip installs can clobber torch (the classic GB10 trap) — the mods
-  # pass re-verifies and repairs, same as install/update. Idempotent.
-  apply_source_patches
+  if [[ "$container_layout" == 1 ]]; then
+    # The entrypoint installs every node's requirements and verifies torch
+    # on each start, so a container restore is content-only by design.
+    info "node requirements and the torch guard run in the container entrypoint at next start"
+  else
+    # Node pip installs can clobber torch (the classic GB10 trap) — the mods
+    # pass re-verifies and repairs, same as install/update. Idempotent.
+    apply_source_patches
+  fi
 
   log "Models check (against the archive's manifest)"
   local missing_count=0 missing_bytes=0 size relpath
@@ -1736,7 +1793,7 @@ cmd_restore() {
       # A corrupt manifest line must not kill the restore via the size
       # arithmetic below (set -e); treat the size as unknown instead.
       [[ "$size" =~ ^[0-9]+$ ]] || size=0
-      [[ -f "$INSTALL_DIR/models/$relpath" ]] && continue
+      [[ -f "$root/models/$relpath" ]] && continue
       printf '  missing: %s (%s)\n' "$relpath" "$(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B")"
       missing_count=$((missing_count + 1))
       missing_bytes=$((missing_bytes + size))
@@ -1751,7 +1808,11 @@ cmd_restore() {
   trap - EXIT
 
   log "Restore complete"
-  echo "  Start ComfyUI:  $0 run"
+  if [[ "$container_layout" == 1 ]]; then
+    echo "  Start ComfyUI:  $0 container run"
+  else
+    echo "  Start ComfyUI:  $0 run"
+  fi
 }
 
 
@@ -2215,6 +2276,25 @@ container path under /opt/ComfyUI — got: '$val'"
   done
 }
 
+# The single directory holding the whole USER_CONTENT set: the legacy
+# checkout (native layout) or DATA_DIR (container-only layout).
+# backup/restore operate through this root. Per-entry spark-mounts.conf
+# overrides scatter the set across parents, which backup/restore do not
+# support yet; that dies loudly instead of silently archiving half the
+# content.
+content_root() {
+  resolve_mounts
+  local root i
+  if [[ "$MOUNTS_LEGACY" == 1 ]]; then root="$INSTALL_DIR"; else root="$DATA_DIR"; fi
+  for i in "${!RESOLVED_ENTRIES[@]}"; do
+    [[ "${RESOLVED_PATHS[$i]}" == "$root/${RESOLVED_ENTRIES[$i]}" ]] \
+      || die "backup/restore do not support per-entry mount overrides yet:
+${RESOLVED_ENTRIES[$i]} resolves to ${RESOLVED_PATHS[$i]} (outside $root).
+Remove the override from $MOUNTS_CONF for this operation."
+  done
+  echo "$root"
+}
+
 seed_mounts_conf() {
   [[ -f "$MOUNTS_CONF" ]] && return 0
   cat > "$MOUNTS_CONF" <<'EOF'
@@ -2367,47 +2447,140 @@ unreachable) — check the network and re-run: $0 container build"
   echo "  Launch it: $0 container run"
 }
 
-cmd_container_run() {
-  need_docker
+# Shared docker-run argument assembly for cmd_container_run (foreground,
+# --rm) and cmd_container_service (detached, restart policy). Fills the
+# CRUN_ARGS array: hardening flags (no capabilities, no privilege
+# escalation, only the GPU), the cache volume, and the resolved content
+# mounts. Dirs are created if missing; the yaml entry is a file and only
+# mounted when it exists (docker would create a dir).
+_container_run_args() {
   docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1 \
     || die "image $CONTAINER_IMAGE:latest not found — run: $0 container build"
-  # Bind-mount exactly the USER_CONTENT set, resolved per the mount
-  # contract (spark-mounts.conf > legacy tree > data/). Dirs are created if
-  # missing; the yaml entry is a file and only mounted when it exists
-  # (docker would create a dir).
   resolve_mounts
   [[ "$MOUNTS_LEGACY" == 1 ]] \
     && info "legacy layout: mounting from the native ComfyUI tree ('$0 migrate' moves content to data/)"
-  local vols=() entry host i
+  CRUN_ARGS=(
+    --name "$CONTAINER_NAME"
+    --gpus all
+    --shm-size 1g
+    --cap-drop ALL
+    --security-opt no-new-privileges
+    -p "$PORT:8188"
+    -v "$CONTAINER_IMAGE-cache:/home/comfy/.cache"
+    -e SPARK_BF16
+    -e SPARK_STATIC_VRAM
+  )
+  local entry host i
   for i in "${!RESOLVED_ENTRIES[@]}"; do
     entry="${RESOLVED_ENTRIES[$i]}" host="${RESOLVED_PATHS[$i]}"
     if [[ "$entry" == *.yaml ]]; then
-      [[ -f "$host" ]] && vols+=(-v "$host:/opt/ComfyUI/$entry:ro")
+      [[ -f "$host" ]] && CRUN_ARGS+=(-v "$host:/opt/ComfyUI/$entry:ro")
     else
       mkdir -p "$host"
-      vols+=(-v "$host:/opt/ComfyUI/$entry")
+      CRUN_ARGS+=(-v "$host:/opt/ComfyUI/$entry")
     fi
   done
   local m
   for m in "${EXTRA_MOUNTS[@]}"; do
-    vols+=(-v "$m")
+    CRUN_ARGS+=(-v "$m")
   done
+}
+
+cmd_container_run() {
+  need_docker
+  _container_run_args
   log "Launching containerized ComfyUI on port $PORT (Ctrl-C stops it)"
-  # Hardening: no capabilities, no privilege escalation, only the GPU
-  # exposed. The named cache volume keeps pip downloads and compiled sm_121
-  # CUDA kernels across container recreation (the container itself is --rm:
-  # every launch starts from the immutable image).
-  exec docker run --rm --name "$CONTAINER_NAME" \
-    --gpus all \
-    --shm-size 1g \
-    --cap-drop ALL \
-    --security-opt no-new-privileges \
-    -p "$PORT:8188" \
-    -v "$CONTAINER_IMAGE-cache:/home/comfy/.cache" \
-    -e SPARK_BF16 \
-    -e SPARK_STATIC_VRAM \
-    "${vols[@]}" \
-    "$CONTAINER_IMAGE:latest" "$@"
+  # --rm: every launch starts from the immutable image; runtime pip state
+  # lives at most until the container exits, and the cache volume keeps
+  # downloads and compiled sm_121 kernels fast across recreation.
+  exec docker run --rm "${CRUN_ARGS[@]}" "$CONTAINER_IMAGE:latest" "$@"
+}
+
+# The container-world 'service': a detached container with a docker restart
+# policy instead of a systemd unit. The docker daemon restarts it after
+# crashes and reboots; no user lingering, no unit files.
+cmd_container_service() {
+  need_docker
+  if [[ "${1:-}" == "--disable" ]]; then
+    if [[ -n "$(docker ps -aq -f "name=^${CONTAINER_NAME}$")" ]]; then
+      docker rm -f "$CONTAINER_NAME" >/dev/null
+      log "Service disabled and container removed"
+    else
+      info "no service container to disable"
+    fi
+    return 0
+  fi
+  [[ -z "${1:-}" ]] || die "Unknown container service option: $1 (valid: --disable)"
+  if [[ -n "$(docker ps -q -f "name=^${CONTAINER_NAME}$")" ]]; then
+    info "container $CONTAINER_NAME is already running ($0 container stop to stop it)"
+    return 0
+  fi
+  # A stopped leftover with the same name (e.g. a previously disabled
+  # service after a reboot) blocks the new run; a RUNNING one was handled
+  # above, so removing here is safe.
+  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  _container_run_args
+  log "Starting containerized ComfyUI as a service (docker restart policy)"
+  docker run -d --restart unless-stopped "${CRUN_ARGS[@]}" \
+    "$CONTAINER_IMAGE:latest" >/dev/null
+  echo "  Running detached on port $PORT; survives crashes and reboots."
+  echo "  Logs:    docker logs -f $CONTAINER_NAME"
+  echo "  Stop:    $0 container stop   (docker restarts it on next boot)"
+  echo "  Disable: $0 container service --disable"
+}
+
+# Container-world install: no venv, no apt, no sudo. Preflight, seed the
+# config templates, create data/, build the image. Idempotent.
+cmd_container_install() {
+  need_docker
+  seed_mounts_conf
+  seed_patch_list
+  mkdir -p "$DATA_DIR"
+  cmd_container_build
+  local ip_hint
+  ip_hint="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  log "Done!"
+  cat <<EOF
+
+  Content root:     $DATA_DIR   (mounts: $MOUNTS_CONF)
+  Start ComfyUI:    $0 container run     (foreground)
+        or:         $0 container service (background, survives reboots)
+  Health check:     $0 container doctor
+  Update later:     $0 container update
+  Web UI:           http://${ip_hint:-<spark-ip>}:$PORT
+  Models go in:     $DATA_DIR/models/checkpoints (etc.)
+EOF
+}
+
+# Container-world reset: content is outside by design, so reset only
+# removes what is reproducible (containers, every image tag, the cache
+# volume) and rebuilds from scratch. data/ is never touched.
+cmd_container_reset() {
+  need_docker
+  local yes=0
+  [[ "${1:-}" == "--yes" ]] && yes=1
+  if [[ "$yes" != 1 ]]; then
+    [[ -t 0 ]] || die "stdin is not a terminal — re-run with: $0 container reset --yes"
+    echo "  This removes the container, ALL $CONTAINER_IMAGE image tags and the"
+    echo "  cache volume, then rebuilds the image from scratch (no cache,"
+    echo "  including the 10-30 min SageAttention compile)."
+    echo "  Your content is not touched."
+    local answer
+    read -r -p "  Proceed? [y/N] " answer
+    [[ "$answer" == y || "$answer" == Y ]] || die "aborted — nothing removed"
+  fi
+  cmd_container_stop
+  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  local ids
+  ids="$(docker images "$CONTAINER_IMAGE" -q | sort -u)"
+  if [[ -n "$ids" ]]; then
+    # shellcheck disable=SC2086
+    docker rmi -f $ids >/dev/null
+    log "Removed all $CONTAINER_IMAGE images"
+  fi
+  docker volume rm "$CONTAINER_IMAGE-cache" >/dev/null 2>&1 \
+    && log "Removed cache volume" || true
+  cmd_container_build --no-cache
 }
 
 cmd_container_stop() {
@@ -2428,10 +2601,11 @@ cmd_container_shell() {
 }
 
 cmd_container_update() {
-  local rollback=0 arg
+  local rollback=0 torch=0 arg
   for arg in "$@"; do
     case "$arg" in
       --rollback) rollback=1 ;;
+      --torch)    torch=1 ;;
       *) die "Unknown container update option: $arg" ;;
     esac
   done
@@ -2468,10 +2642,15 @@ cmd_container_update() {
   # 2026-07-20: tagging :previous after the build found the old image
   # already gone). Promote the temp tag to :previous only on a real change,
   # so an unchanged rebuild never clobbers an older rollback point.
+  # --torch: bust exactly the torch stage (fresh cu130 wheels); the
+  # SageAttention stage sits on top of it and rebuilds automatically, same
+  # semantic as the native update --torch.
+  local build_args=()
+  (( torch )) && build_args+=(--no-cache-filter=torch)
   local before after
   before="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
   [[ -n "$before" ]] && docker tag "$before" "$CONTAINER_IMAGE:pre-update"
-  cmd_container_build
+  cmd_container_build "${build_args[@]}"
   after="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:latest")"
   if [[ "$before" == "$after" ]]; then
     [[ -n "$before" ]] && docker rmi "$CONTAINER_IMAGE:pre-update" >/dev/null
@@ -2555,12 +2734,66 @@ the update: $0 container stop && $0 container run"
 
 cmd_container_doctor() {
   need_docker
+  # ok/bad increment these (shared with the native doctor's helpers).
+  PASS=0; FAIL=0
+  hdr "container host"
+  local drv
+  drv="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || true)"
+  if [[ -n "$drv" ]]; then
+    ok "NVIDIA driver $drv"
+  else
+    bad "nvidia-smi not working on the host — the container cannot get a GPU"
+  fi
+  if docker info 2>/dev/null | grep -q nvidia; then
+    ok "docker daemon up, nvidia runtime registered"
+  else
+    bad "nvidia runtime missing from docker — install the NVIDIA Container Toolkit"
+  fi
+  if docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1; then
+    local csha created
+    csha="$(docker image inspect -f '{{index .Config.Labels "org.spark-comfyui.comfy-sha"}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
+    created="$(docker image inspect -f '{{.Created}}' "$CONTAINER_IMAGE:latest" | cut -dT -f1)"
+    ok "image $CONTAINER_IMAGE:latest (built $created, ComfyUI ${csha:0:12})"
+    docker image inspect "$CONTAINER_IMAGE:previous" >/dev/null 2>&1 \
+      && info "rollback point present ($CONTAINER_IMAGE:previous)" \
+      || info "no rollback point yet (:previous appears after the first changing update)"
+  else
+    bad "image $CONTAINER_IMAGE:latest missing — run: $0 container build"
+  fi
+  local cid
+  cid="$(docker ps -q -f "name=^${CONTAINER_NAME}$")"
+  if [[ -n "$cid" ]]; then
+    local running_img latest_img
+    running_img="$(docker inspect -f '{{.Image}}' "$cid")"
+    latest_img="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
+    if [[ -n "$latest_img" && "$running_img" != "$latest_img" ]]; then
+      bad "running container uses an outdated image — restart: $0 container stop && $0 container run"
+    else
+      ok "container running ($(docker ps -f "id=$cid" --format '{{.Status}}'))"
+    fi
+  else
+    info "container not running"
+  fi
+  if [[ -n "$(swapon --noheadings 2>/dev/null)" ]]; then
+    warn "swap is ENABLED on the host — heavy workloads can freeze the box ($0 tune)"
+  else
+    ok "swap disabled on the host"
+  fi
+  local newest
+  newest="$(ls -1t "$BASE_DIR"/backups/spark-backup-*.tgz 2>/dev/null | head -1 || true)"
+  if [[ -n "$newest" ]]; then
+    info "Backup: $(basename "$newest"), $(( ( $(date +%s) - $(stat -c %Y "$newest") ) / 86400 )) days old"
+  else
+    info "Backup: none in backups/ (run: $0 backup)"
+  fi
+
   docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1 \
-    || die "image $CONTAINER_IMAGE:latest not found — run: $0 container build"
+    || die "image missing — the GPU gates need it; run: $0 container build"
   log "Running the GPU gates inside a throwaway container"
   # Same live gates the native doctor runs, executed in the image itself:
   # what passes here is exactly what the entrypoint will see at launch.
-  docker run --rm -i --gpus all --entrypoint bash "$CONTAINER_IMAGE:latest" -s <<'EOS'
+  local gate_rc=0
+  docker run --rm -i --gpus all --entrypoint bash "$CONTAINER_IMAGE:latest" -s <<'EOS' || gate_rc=$?
 set -uo pipefail
 ok()   { printf '  \033[1;32m[PASS]\033[0m %s\n' "$*"; }
 bad()  { printf '  \033[1;31m[FAIL]\033[0m %s\n' "$*"; fails=$((fails+1)); }
@@ -2600,20 +2833,30 @@ echo
 if [[ "$fails" -eq 0 ]]; then echo "All container gates passed."
 else echo "$fails gate(s) FAILED."; exit 1; fi
 EOS
+  echo
+  if [[ "$FAIL" -eq 0 && "$gate_rc" -eq 0 ]]; then
+    echo "Host checks: $PASS passed. Everything healthy."
+  else
+    echo "Host checks: $PASS passed, $FAIL failed; GPU gates $( [[ $gate_rc -eq 0 ]] && echo passed || echo FAILED )."
+    return 1
+  fi
 }
 
 cmd_container() {
   local sub="${1:-}"
   shift || true
   case "$sub" in
-    build)  cmd_container_build "$@" ;;
-    run)    cmd_container_run "$@" ;;
-    stop)   cmd_container_stop ;;
-    shell)  cmd_container_shell ;;
-    update) cmd_container_update "$@" ;;
-    status) cmd_container_status ;;
-    doctor) cmd_container_doctor ;;
-    *) die "Unknown container subcommand: ${sub:-<none>} (try: container build | run | stop | update | status | doctor | shell)" ;;
+    install) cmd_container_install ;;
+    build)   cmd_container_build "$@" ;;
+    run)     cmd_container_run "$@" ;;
+    service) cmd_container_service "$@" ;;
+    stop)    cmd_container_stop ;;
+    shell)   cmd_container_shell ;;
+    update)  cmd_container_update "$@" ;;
+    status)  cmd_container_status ;;
+    doctor)  cmd_container_doctor ;;
+    reset)   cmd_container_reset "$@" ;;
+    *) die "Unknown container subcommand: ${sub:-<none>} (try: container install | build | run | service | stop | update | status | doctor | reset | shell)" ;;
   esac
 }
 

@@ -7,3 +7,4 @@
 !mods/**
 !container
 !container/**
+!comfyui-patches.list

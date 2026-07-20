@@ -506,13 +506,27 @@ Field-learned docker gotchas (do not re-derive):
 - .dockerignore whitelists the build context (script, mods/, container/):
   BASE_DIR on a live install holds 100+ GB next to the Dockerfile.
 
-Phase status: phase 1 (build/run/stop/shell) and phase 2 (update/rollback/
-status/doctor) implemented and field-verified on the GB10. Phase 3 open:
-image slimming (multi-stage), port-binding choice (127.0.0.1 vs LAN),
-restore parity for container-only installs, README/docs, release plan.
-backup already works against a container install as-is (it never touches
-the venv); restore works but its self-heal path still runs the NATIVE
-cmd_install.
+Phase status: phases 1 (build/run/stop/shell), 2 (update/rollback/status/
+doctor), 3a (data/ layout, spark-mounts.conf, migrate) and 3b (lifecycle
+parity) implemented and field-verified on the GB10. 3b delivered:
+container install (no venv, no sudo; seeds both config templates),
+container service via docker restart policy (unless-stopped, --disable),
+update --torch via --no-cache-filter on the named torch stage, the patch
+list COPY'd into the build and merged by container/build-patches.sh (a
+changed list busts exactly the clone-down layers; a conflict fails the
+build loudly), container doctor grown host sections (driver, runtime,
+image age and comfy-sha label, rollback point, drift, swap, backup age),
+backup/restore layout-aware through content_root (single-root rule:
+per-entry mount overrides die loudly; container restores are content-only
+because the entrypoint installs requirements and verifies torch), and
+container reset (removes containers, all image tags, cache volume;
+rebuilds --no-cache; data/ never touched). The image now carries
+org.spark-comfyui.comfy-sha and sage-ref labels; backup meta reads the
+commit from the label when no checkout exists. Remaining before the cut
+(3c/3d): status --watch pid-pattern adaptation and row-by-row
+verification, the A/B cutover bench on production, native-path removal
+with the legacy-layout update gate and legacy branch, README rewrite.
+Phase 4 unchanged (slimming, GHCR, rootless, read-only rootfs).
 
 ## Env var overrides
 
