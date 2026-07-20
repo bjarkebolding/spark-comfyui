@@ -1366,8 +1366,14 @@ cmd_status() {
 
   hdr "Process"
   if pgrep -f "main.py --listen" >/dev/null 2>&1; then
-    local pid; pid="$(pgrep -f 'main.py --listen' | head -1)"
-    echo "  ComfyUI RUNNING (pid $pid) -> http://$(hostname -I 2>/dev/null | awk '{print $1}'):$PORT"
+    local pid where=""
+    pid="$(pgrep -f 'main.py --listen' | head -1)"
+    # Container processes are visible in the host process table, so the
+    # same pgrep finds both worlds; the tag says which one this is.
+    command -v docker >/dev/null 2>&1 \
+      && [[ -n "$(docker ps -q -f "name=^${CONTAINER_NAME}$" 2>/dev/null)" ]] \
+      && where=", containerized"
+    echo "  ComfyUI RUNNING (pid $pid$where) -> http://$(hostname -I 2>/dev/null | awk '{print $1}'):$PORT"
     pgrep -af "main.py --listen" | grep -q "use-sage-attention" \
       && echo "  attention: SageAttention" || echo "  attention: PyTorch SDPA"
   else
@@ -1391,6 +1397,13 @@ cmd_status() {
     if [[ -f "$PATCH_LIST" ]] && grep -qE '^[^#[:space:]]' "$PATCH_LIST"; then
       echo "  patch list: $(grep -cE '^[^#[:space:]]' "$PATCH_LIST") entries in $PATCH_LIST"
     fi
+  elif command -v docker >/dev/null 2>&1 \
+       && docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1; then
+    # Container-only host: no checkout; the image label carries the commit.
+    local csha built
+    csha="$(docker image inspect -f '{{index .Config.Labels "org.spark-comfyui.comfy-sha"}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
+    built="$(docker image inspect -f '{{.Created}}' "$CONTAINER_IMAGE:latest" | cut -dT -f1)"
+    echo "  ComfyUI: ${csha:0:12} (image $CONTAINER_IMAGE:latest, built $built)"
   fi
   if [[ -f "$VENV_DIR/bin/activate" ]]; then
     # shellcheck disable=SC1091
@@ -1398,7 +1411,13 @@ cmd_status() {
     python -c "import torch; print(f'  torch: {torch.__version__} (CUDA {torch.version.cuda})')" 2>/dev/null
     [[ -f "$SAGE_MARKER" ]] && echo "  SageAttention: verified" || echo "  SageAttention: NOT verified"
   fi
-  local cfg="$INSTALL_DIR/user/__manager/config.ini"
+  # The Manager config lives under the resolved user mount (data/ on a
+  # container-only host, the checkout on a legacy one).
+  resolve_mounts
+  local cfg="" ci
+  for ci in "${!RESOLVED_ENTRIES[@]}"; do
+    [[ "${RESOLVED_ENTRIES[$ci]}" == user ]] && cfg="${RESOLVED_PATHS[$ci]}/__manager/config.ini"
+  done
   [[ -f "$cfg" ]] && grep -q 'network_mode *= *personal_cloud' "$cfg" \
     && echo "  Manager: network_mode = personal_cloud" \
     || echo "  Manager: personal_cloud NOT set"
@@ -1411,6 +1430,14 @@ cmd_stop() {
   if systemctl --user is-active comfyui.service >/dev/null 2>&1; then
     systemctl --user stop comfyui.service
     echo "systemd service stopped"
+  elif command -v docker >/dev/null 2>&1 \
+       && [[ -n "$(docker ps -q -f "name=^${CONTAINER_NAME}$" 2>/dev/null)" ]]; then
+    # The containerized server: docker stop, never pkill — the container
+    # python matches the pkill pattern below (host-visible process), and
+    # killing pid 1 of a service-mode container would only make the
+    # restart policy relaunch it.
+    docker stop "$CONTAINER_NAME" >/dev/null
+    echo "container stopped"
   elif pgrep -f "main.py --listen" >/dev/null 2>&1; then
     pkill -f "main.py --listen"
     echo "ComfyUI process stopped"

@@ -522,10 +522,21 @@ because the entrypoint installs requirements and verifies torch), and
 container reset (removes containers, all image tags, cache volume;
 rebuilds --no-cache; data/ never touched). The image now carries
 org.spark-comfyui.comfy-sha and sage-ref labels; backup meta reads the
-commit from the label when no checkout exists. Remaining before the cut
-(3c/3d): status --watch pid-pattern adaptation and row-by-row
-verification, the A/B cutover bench on production, native-path removal
-with the legacy-layout update gate and legacy branch, README rewrite.
+commit from the label when no checkout exists. 3c is DONE (2026-07-20): status
+and stop are container-aware (pgrep finds container processes in the host
+table unchanged; stop routes to docker stop first, since pkilling pid 1
+of a service-mode container would just trigger the restart policy;
+Versions reads the image label on checkout-less hosts; the Manager config
+line uses the resolved user mount), the watch needed NO pid changes and
+was field-verified under real load in both worlds (GEN/ITS/LAT/Q/HIT and
+CGPU all populated), and the CUTOVER GATE PASSED: Krea-2 Turbo 1MP 8
+steps, 4 gens per condition, fresh launch each, native first=29.8s
+steady=13.59s vs container first=28.9s steady=13.61s (0.15% delta, well
+inside the 3% threshold) and all four seed-matched output pairs are
+BIT-IDENTICAL (mean abs diff 0, max 0). The bench drove the production
+workflow extracted from an output PNG's embedded API prompt via POST
+/prompt with a fixed seed sequence. Native-path removal (3d: legacy
+update gate, legacy branch, README rewrite, major release) is unblocked.
 Phase 4 unchanged (slimming, GHCR, rootless, read-only rootfs).
 
 ## Env var overrides
