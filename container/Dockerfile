@@ -13,7 +13,13 @@
 # Single stage on the devel image for now; slimming via a multi-stage build
 # is a later phase.
 
-ARG CUDA_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu24.04
+# Pinned to the 13.0 patch line on purpose: the host driver (r580) is a
+# CUDA 13.0 driver and torch's cu130 wheels are 13.0 builds. 13.1+ images
+# ship a newer ptxas whose embedded PTX the driver JIT may reject ("no
+# kernel image", the GB10 classic) for zero benefit — sm_121 is fully
+# supported since 13.0.0. Bumping past 13.0.x is a deliberate pin change
+# with a field test, same policy as SAGE_REF.
+ARG CUDA_IMAGE=nvidia/cuda:13.0.3-devel-ubuntu24.04
 FROM ${CUDA_IMAGE}
 
 ARG TORCH_INDEX=https://download.pytorch.org/whl/cu130
