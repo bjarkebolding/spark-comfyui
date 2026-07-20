@@ -18,6 +18,11 @@ backups/
 # commented template automatically on first install)
 comfyui-patches.list
 
+# Container-only layout: all user content, and the personal mount
+# configuration (seeded as a commented template, like the patch list)
+data/
+spark-mounts.conf
+
 # Editor / OS noise
 .vscode/
 .idea/
