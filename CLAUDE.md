@@ -16,16 +16,24 @@ program output contains dashes.
 
 `spark-comfyui` is a single-entry-point bash tool that installs, runs,
 updates, and maintains [ComfyUI](https://github.com/Comfy-Org/ComfyUI) on the
-**NVIDIA DGX Spark (GB10 Grace Blackwell)**. The Spark is unusual hardware:
+**NVIDIA DGX Spark (GB10 Grace Blackwell)** — since the container cut,
+entirely as a hardened docker container. The Spark is unusual hardware:
 aarch64 Grace CPU, an sm_121 Blackwell GPU most toolchains don't target yet,
 and 128 GB of unified CPU/GPU memory. A generic ComfyUI install either fails
 or runs in silently degraded states. This tool makes the whole lifecycle
-automatic and self-healing.
+automatic, reproducible (the image), and confined (custom-node code cannot
+touch the host).
 
 Author/owner: GitHub `bjarkebolding`. Target repo name: `spark-comfyui`.
-Hardware in use: DGX Spark, hostname `sparky`, install root `~/comfyui-spark/`.
-Published: https://github.com/bjarkebolding/spark-comfyui.
-Current version: **2026.07.19** (MIT licensed, shellcheck-clean).
+Hardware in use: DGX Spark, hostname `sparky`. Development home:
+`~/projects/spark-comfyui` (remotes: `origin` GitHub, `live` the legacy
+checkout at `~/spark-comfyui`, still holding the production content
+pre-migration). Published: https://github.com/bjarkebolding/spark-comfyui.
+Current released version: **2026.07.19** (the last native release; branch
+`legacy` points at it). The container-only cut on `container-dev` is
+complete and field-verified but UNRELEASED — nothing container-related is
+pushed to GitHub yet, and the branch deliberately has no upstream so a
+bare `git push` errors. MIT licensed, shellcheck-clean.
 
 ## Versioning and releasing
 
@@ -55,8 +63,10 @@ VERSION in the same push.** Docs-only pushes need no bump.
    heuristics: `TORCH_CUDA_ARCH_LIST="12.0"` and grepping `ptxas --help` for
    `sm_121`.
 4. **Idempotent and self-healing.** `install` and `update` are safe to re-run;
-   they skip or refresh, never duplicate or break. Anything that patches the
-   ComfyUI tree must re-apply cleanly after `git pull`.
+   they skip or refresh, never duplicate or break. Since the cut this is
+   largely structural: the image is immutable, patches bake into it from a
+   fresh clone every build, and the entrypoint re-verifies the stack on
+   every start.
 5. **Fail loud on real problems, quiet when healthy.** No silent degradation,
    and no false alarms: benign platform noise (e.g. the aarch64
    `nvidia-*-cu13 is not supported on this platform` line from `pip check`) is
@@ -70,143 +80,102 @@ VERSION in the same push.** Docs-only pushes need no bump.
 ## Repository layout
 
 ```
-spark-comfyui.sh          # The entry point: install/run/update lifecycle +
-                          # dispatch, ~1700 lines. GB10 venv-package logic
-                          # (torch, SageAttention, onnx) lives in
-                          # mods/_lib/mod_common.sh, not here.
-mods/                     # discovered, applied and self-healed automatically
-  _lib/mod_common.sh      # shared helpers: py_patch_file, py_marker_present,
-                          # mod_export, and the GB10 venv-package functions
-                          # (need_nvcc, sage_kernel_ok, onnx_gpu_ok,
-                          # ensure_onnx_gpu, ensure_setuptools_compat,
-                          # repair_torch, torch_cuda_diag,
-                          # build_and_verify_sage). Sourced by
-                          # the main script itself at startup, not just mods.
-  05-setuptools-compat/   # setuptools pinned within torch's own constraint
-    run.sh
-  10-unified-memory-free/ # get_free_memory() -> host-available unified pool
-    run.sh transform.py
-  20-torch-repair/        # torch CUDA verified/repaired; also mod_prerun
-    run.sh                # (runs before every `run`, not just install/update)
-  30-manager-config/      # ComfyUI-Manager config.ini (network_mode, uv,
-                          # downgrade_blacklist). NOT pip_auto_fix.list, see
-                          # configure.py's docstring (crashed Manager's own
-                          # version parser on every launch, retired 2026-07).
-    run.sh configure.py
-  40-sageattention/       # native sm_121 build + live kernel verification
-    run.sh
-  50-onnxruntime-gpu/     # community sm_121 GPU wheel for preprocessors
-    run.sh
-  README.md               # how to author a mod (incl. MOD_CRITICAL/MOD_STREAM)
-README.md LICENSE .gitignore CLAUDE.md
+spark-comfyui.sh          # The entry point: ~1900 lines. Host-side
+                          # lifecycle (docker orchestration, mounts,
+                          # migrate, backup/restore, status/watch, tune).
+container/
+  Dockerfile              # 4 named stages: base / torch / sage / final.
+                          # Everything reproducible bakes in here.
+  entrypoint.sh           # runtime half of the mod system (see below)
+  build-mods.sh           # build-time half (mods 05 + 10)
+  build-patches.sh        # merges comfyui-patches.list in-build
+  ROADMAP.md              # the container-only architecture + phase log
+mods/                     # mod contract + shared helper library
+  _lib/mod_common.sh      # py_patch_file, torch_cuda_diag, sage_kernel_ok,
+                          # onnx_gpu_ok, kitchen_nvfp4_ok, repair_torch...
+                          # sourced by the host script AND inside the image
+  05-setuptools-compat/   # build-time: setuptools within torch's pin
+  10-unified-memory-free/ # build-time: get_free_memory() unified pool
+  20-torch-repair/        # entrypoint: torch guard (mod_prerun + diag)
+  30-manager-config/      # entrypoint: Manager config.ini on user mount
+  40-sageattention/       # vestigial run.sh; logic in Dockerfile + gates
+  50-onnxruntime-gpu/     # vestigial run.sh; logic in Dockerfile + gates
+  README.md
+data/                     # ALL user content (gitignored), bind-mounted
+spark-mounts.conf         # mount overrides (gitignored, seeded template)
+comfyui-patches.list      # patch list (gitignored, seeded template)
+README.md LICENSE .gitignore .dockerignore CLAUDE.md
 ```
 
-The script installs ComfyUI, the venv, and SageAttention next to itself
-(`ComfyUI/`, `comfyui-env/`, `SageAttention/`), and `backup` writes to
-`backups/`, all gitignored.
+The docker image (`spark-comfyui:latest`, ~22 GB) and the cache volume
+(`spark-comfyui-cache`: pip downloads + compiled sm_121 kernels) live in
+docker's storage, not the repo dir. `backup` writes to `backups/`
+(gitignored). Legacy trees (`ComfyUI/`, `comfyui-env/`, `SageAttention/`)
+exist only on not-yet-migrated installs.
 
 ## Commands (dispatch at the bottom of the script)
 
-`install` · `run [args]` · `stop` · `update [--torch|--rollback]` · `doctor` ·
-`status [--watch [SEC]]` · `tune [--clock-cap MHZ] [--persist]` ·
-`backup [--with-output] [FILE]` · `restore FILE` · `reset [--yes]` ·
-`service` · `--version`. Hidden back-compat aliases: `verify` (doctor), `monitor`
-(status --watch), `rollback` (update --rollback), `bench` (removed, prints
-A/B guidance).
+`install` · `run [args]` · `service [--disable]` · `stop` ·
+`update [--torch|--rollback]` · `doctor` · `status [--watch [SEC]]` ·
+`tune [--clock-cap MHZ] [--persist]` · `backup [--with-output] [FILE]` ·
+`restore FILE` · `reset [--yes]` · `migrate [--keep-legacy] [--yes]` ·
+`shell` · `--version`. Hidden aliases: the `container <verb>` spellings
+from the dev phase, `verify` (doctor), `monitor` (status --watch),
+`rollback` (update --rollback).
 
-Mental model, also printed in `--help`: install once, then run; update now
-and then; something feels wrong, run doctor. `run` also runs a cheap
-pre-launch mod pass (`apply_prerun_mods`, currently just `20-torch-repair`'s
-guard against a custom node having swapped in CPU torch since the last
-launch). `update` self-updates the tool itself first (`self_update`: ff-only
-git pull of BASE_DIR when upstream is strictly ahead, then re-execs the fresh
-script exactly once; bash must never keep executing a file that changed under
-it).
+Mental model, also printed in `--help`: install once (image build), then
+run or service; update now and then (cached rebuild + `:previous`
+rollback point); something feels wrong, run doctor. `update` self-updates
+the tool first (`self_update`: ff-only pull, re-exec once;
+`SELF_UPDATE_RESUME` makes the re-exec land back in the container
+update). `install` and `update` refuse to run on a legacy native layout
+(`check_legacy_layout`, the upgrade cliff) and print the migrate/legacy
+instructions instead; `run` and `backup` keep working there via the
+legacy mount fallback until the user migrates.
 
 ## The mod system (most important architecture)
 
-A "mod" is a self-contained, idempotent, self-healing unit that
-`spark-comfyui.sh` applies during install/update and verifies in `doctor`.
-Two flavors share one contract: **source-patch mods** that edit ComfyUI's own
-Python (`10`) or config tree (`30`), and **venv-package mods** that
-install/verify/repair virtualenv state (`05`, `20`, `40`, `50`). The four
-functions that used to live directly in the main script
-(`ensure_setuptools_compat`, `repair_torch`, `build_and_verify_sage`,
-`ensure_onnx_gpu`) now live in `mods/_lib/mod_common.sh`, wrapped by thin
-`mods/NN-name/run.sh` files. Every other direct call site of those functions
-(`cmd_run`'s SageAttention shadow-check, `cmd_rollback`, `cmd_doctor`'s
-diagnostics) still calls them directly. Only install/update/pre-run
-orchestration goes through the mod pass.
+A "mod" is a self-contained, idempotent unit under `mods/NN-name/`. Since
+the cut, mods run in two places, both INSIDE the image lifecycle; there is
+no host-side mod pass anymore:
 
-Each `mods/<name>/run.sh` is **sourced** (not executed) in a subshell with
-`_lib/mod_common.sh` preloaded and `INSTALL_DIR`, `VENV_DIR`, `MOD_DIR`
-exported. It must define three shell functions:
+- **Image build** (`container/build-mods.sh`): runs `05-setuptools-compat`
+  and `10-unified-memory-free` — everything that needs neither a GPU nor
+  user content. A failed apply or verify fails the build.
+- **Entrypoint** (`container/entrypoint.sh`, every start): custom-node
+  requirements install (before the torch guard, because node installs are
+  what clobber torch), `20-torch-repair`'s `mod_prerun` with
+  `torch_cuda_diag`, the live SageAttention kernel gate (`sage_kernel_ok`
+  directly — golden rule 3 lives here since builds have no GPU; failure
+  refuses to launch), then `30-manager-config` onto the mounted user dir.
 
-- `mod_describe`: echoes a one-line description
-- `mod_apply`: applies idempotently, echoes a status, returns 0
-- `mod_verify`: exit 0 if currently active, 1 if not
+The authoring contract is unchanged: each `run.sh` is a sourced fragment
+(`# shellcheck shell=bash`) defining `mod_describe` / `mod_apply` /
+`mod_verify` (+ optional `mod_prerun`), with `mods/_lib/mod_common.sh`
+preloaded and `INSTALL_DIR`, `VENV_DIR`, `MOD_DIR` set. Status protocol:
+`mod_apply`'s first output token is `applied`/`present`/`skipped`.
+`py_patch_file <rel> <tag> <transform.py>` still does marker idempotency,
+a `.spark-orig` backup refreshed per apply, and the `ast.parse` guard
+that reverts a patch producing invalid Python; transforms echo input
+unchanged when their anchor is missing (`skipped:anchor-not-found` is how
+"upstream moved the code" surfaces — the build fails and names it).
 
-and may optionally define a fourth:
+Vestigial but retained: `MOD_CRITICAL`/`MOD_STREAM`/`mod_export` were
+consumed by the deleted native runner; the declarations remain in the
+run.sh files as documentation and for a possible future runner, and
+`mods/40-sageattention`/`50-onnxruntime-gpu` keep their run.sh even
+though the image build installs Sage/onnx in Dockerfile steps — their
+underlying functions (`sage_kernel_ok`, `onnx_gpu_ok`, `repair_torch`,
+`torch_cuda_diag`, `kitchen_nvfp4_ok`) live in `mod_common.sh` and are
+what the entrypoint and doctor gates call.
 
-- `mod_prerun`: runs before every `run`, not just install/update. Absence
-  is a silent no-op; only `20-torch-repair` defines it.
+Patched files never sit modified in a host tree anymore: the patch is
+baked into the image, and every image rebuild starts from a fresh clone.
+The whole sync/revert dance the native updater needed is gone.
 
-**Status protocol** (parsed by `_invoke_mod`/`apply_source_patches` in the
-main script): the first token of `mod_apply`'s output is the class
-(`applied`, `present`, or `skipped`) and any remainder is human detail shown
-to the user. Example: `applied config updated (network_mode, use_uv)`.
-
-**Extended contract for venv-package mods**: three opt-in top-level
-declarations a `run.sh` can set, all unused by the two source-patch mods.
-
-- `MOD_CRITICAL=1`: a nonzero exit from `mod_apply`/`mod_prerun` aborts the
-  whole script (`die`) instead of being swallowed into `skipped:error`. Set
-  by `20` and `40` (torch/Sage failure means the install is genuinely
-  broken). NOT set by `05`, `10`, `30`, `50` (their failure just means one
-  optimization is inactive, generation still works).
-- `MOD_STREAM=1`: output streams live to the terminal instead of being
-  buffered until `mod_apply` returns (buffering would hide all progress
-  during SageAttention's 10-30 min build or onnxruntime's ~220 MB wheel
-  download). Set by `20`, `40`, `50`. A streamed mod reports status via
-  `mod_export STATUS=<word>` instead of an echoed line, since stdout is no
-  longer captured.
-- `mod_export KEY=value`: appends to `$MOD_STATE_FILE`; the runner reads it
-  back after the mod returns and sets `KEY` as a global in the caller's
-  scope. This is how `cmd_update`'s summary gets `SAGE_ACTION` (from `40`)
-  and `ORT_STATE` (from `50`), instead of the mod's function setting them as
-  plain globals directly.
-
-`cmd_update` also exports `SPARK_TORCH_UPGRADED` (the `--torch` flag) before
-the mods pass runs, so `40-sageattention`'s `mod_apply` can use it as an
-extra forced-rebuild trigger alongside its own marker/git-rev-drift check.
-
-For Python-source patches use the helpers in `mod_common.sh`.
-`py_patch_file <rel> <tag> <transform.py>` handles the marker/idempotency
-check, a `<file>.spark-orig` backup (refreshed on every apply so the revert
-below never restores stale upstream code), and an `ast.parse` guard that
-**reverts the file if the patch would produce invalid Python**. The
-`transform.py` reads source on stdin, writes patched source to stdout, and
-MUST echo input unchanged when its anchor isn't found. That is how "upstream
-moved the code" is detected and reported as `skipped:anchor-not-found`. The
-marker string arrives via `$MARKER`.
-
-Mods run in **filename order** (numeric prefix; this is what gives `05`
-setuptools before `20` torch before `40` Sage). `_`-prefixed dirs are skipped.
-Disable all mods, including the pre-run guard, with `SPARK_SOURCE_PATCHES=0`.
-
-Patched files sit MODIFIED in ComfyUI's working tree between updates. That
-is why `sync_comfyui` reverts every tracked modified file carrying the
-`# spark-comfyui:` marker before its branch switch and ff-only merge (the
-mods pass re-applies them right after): without the revert, the first
-upstream commit touching a patched file kills `update` on git's "local
-changes would be overwritten" error (reproduced 2026-07-18). User edits
-without a marker are deliberately left alone. `cmd_rollback` runs
-`apply_source_patches` after its hard reset for the same reason: the reset
-wipes the patches.
-
-Adding a source-patch mod: drop a new `mods/NN-name/` dir; no main-script
-edits needed. A venv-package mod needs its underlying logic added to
-`mod_common.sh` too if it doesn't already live there.
+Adding a build-time source-patch mod: drop `mods/NN-name/` AND add it to
+the list in `container/build-mods.sh`. Adding entrypoint behavior: edit
+`container/entrypoint.sh`.
 
 ## status --watch
 
@@ -280,102 +249,55 @@ it is a tag on the sm-clk row now. GB10 nvidia-smi N/A fields: `clocks.mem`,
 `fan.speed`, `temperature.memory`, `power.limit` (and `nvidia-smi -pl` does
 not work, hence `tune --clock-cap`).
 
-## reset / backup / restore
+## reset / backup / restore / migrate
 
-Three commands, one shared definition of "user content": the readonly
-`USER_CONTENT` array near the top of the script (`models user input output
-custom_nodes extra_model_paths.yaml`). `reset` iterates it directly.
-`backup`/`restore` cover the same set but handle each entry with its own
-rules (manifests, filters), so they do not loop over the array; keep the
-three in sync by hand when the set changes.
+One shared definition of "user content": the readonly `USER_CONTENT` array
+(`models user input output custom_nodes extra_model_paths.yaml`), resolved
+to host paths by `resolve_mounts` (see the containerization section).
+`content_root` returns the single directory holding the whole set (data/
+or, pre-migration, the legacy checkout) and dies loudly on per-entry
+spark-mounts.conf overrides — backup/restore do not support scattered
+roots yet, and half a backup must never look like a whole one.
 
-**reset (`cmd_reset`)**: wipe `INSTALL_DIR`, `VENV_DIR`, `SAGE_SRC` and rerun
-`cmd_install`, preserving user content via a hold directory. The hold dir is
-a sibling of the install dir (`.spark-reset-hold`), so every `mv` is a
-same-filesystem rename: instant even for 74 GB of models. Protocol, in order:
+**reset (`cmd_container_reset`)**: content is outside the image by design,
+so reset only removes what is reproducible: the container, every image
+tag, the cache volume, then rebuilds with `--no-cache`. `data/` is never
+touched. The old native reset's hold-dir protocol, wipe guard and resume
+logic are gone (the legacy branch still carries them).
 
-1. Confirmation: the user must type the word `reset`; `--yes` skips it and
-   is required when stdin is not a terminal.
-2. Hold move: each `USER_CONTENT` entry is `mv`'d into the hold dir.
-   No-overwrite rule: if an entry already exists in the hold dir (left by an
-   interrupted earlier reset) AND in the install dir, `die`. Guessing which
-   copy is the user's is not this script's call.
-3. Wipe guard: before any `rm -rf`, re-check that no `USER_CONTENT` entry
-   remains under `INSTALL_DIR`. This is the line between "reset" and
-   "deleted the models after a failed mv".
-4. `cd "$BASE_DIR"` (the wipe may delete the caller's cwd, which would break
-   git/pip inside `cmd_install`), wipe, write `wiped` to `$hold_dir/.phase`,
-   then `cmd_install`.
-5. Move everything back (the fresh-from-git skeleton dirs lose to the
-   user's copies), then `git checkout -q --` each `USER_CONTENT` entry: the
-   held dirs carry stock tracked files from the old checkout
-   (`custom_nodes/websocket_image_save.py`, `models/configs/*`) and putting
-   them back at the fresh HEAD keeps the tree clean for `update`'s ff-only
-   merge. `checkout --` never touches untracked user files. Finally remove
-   `.phase` and `rmdir` the hold dir.
+**backup (`cmd_backup`)**: unchanged in spirit: small tgz of meta,
+manifests, plain-node copies, config files; `user/`, `input/`, `output/`
+tarred from the live tree with `--ignore-failed-read` (exit 1 tolerated:
+safe while serving). The ComfyUI commit in `meta` comes from the checkout
+when one exists, else from the image label `org.spark-comfyui.comfy-sha`.
+Works on both layouts (it is read-only, so the legacy tree stays
+supported for pre-migration backups). Archive format unchanged
+(`format=1`), so old backups restore fine.
 
-Resume cases (re-running converges): interrupted before the wipe (no
-`.phase`), the hold move just continues, with the no-overwrite rule catching
-real collisions; interrupted anywhere after the wipe (`.phase` says
-`wiped`), `cmd_install` reruns unconditionally. A `.git` dir is no proof the
-interrupted install finished (clone is its first step), so there is
-deliberately no skip-install shortcut; `cmd_install` is idempotent and
-skips or refreshes whatever did complete. The hold dir lives inside the
-repo checkout on a default install, so `.gitignore` lists
-`.spark-reset-hold/` (a `git clean -fd` must never see held models as
-junk).
+**restore (`cmd_restore`)**: container-layout only; on a legacy layout it
+dies and points at `migrate`. Order: unpack + `format=1` check; build the
+image if missing; `container stop`; merge `user/`/`input/`/`output/` into
+the content root; restore config files (live copies saved aside as
+`.bak`); custom nodes (plain copies, then manifest clones with detached
+checkout, prompt-proofed); models manifest diffed against disk with sizes.
+NO pip step and no mod pass: the entrypoint installs every node's
+requirements and verifies torch on each start, so a restore is
+content-only by construction.
 
-**backup (`cmd_backup`)**: writes to `FILE` or a timestamped default under
-`backups/` next to the script. Only the small generated entries (meta,
-manifests, plain-node copies, config files) are staged in a mktemp dir
-(cleaned by an EXIT trap on failure); `user/`, `input/` and `output/` are
-tarred straight from the live tree with `--exclude` for logs and caches. tar
-runs with `--ignore-failed-read`, and exit status 1 (a file changed or
-vanished mid-read) is a warning, not a failure; that tolerance is what makes
-"safe while ComfyUI is serving" true. Archive format (top-level entries,
-`format=1`):
+**migrate (`cmd_migrate [--keep-legacy] [--yes]`)**: one-time move of the
+`USER_CONTENT` set from a legacy checkout into `data/` by same-filesystem
+rename. Collision rule: an entry existing on both sides dies UNLESS the
+checkout side is 100 percent git-tracked (stock skeletons restored by an
+earlier `--keep-legacy` run); trackedness is checked with `git ls-files
+--others` WITHOUT `--exclude-standard`, because ComfyUI's own .gitignore
+covers the model dirs and an ignored user model is still user content.
+`--keep-legacy` restores the stock tracked skeletons per entry
+(multi-pathspec checkout fails wholesale on one bad pathspec). The
+delete pass re-checks that no untracked file remains under any entry
+before `rm -rf`. Also retires the old native systemd unit. Idempotent.
 
-- `meta`: `format=1`, tool version, ISO date, hostname, ComfyUI commit.
-- `user/`: `INSTALL_DIR/user` minus `*.log` files and `__pycache__`.
-- `input/` (only if non-empty); `output/` only with `--with-output`.
-- `comfyui-patches.list` and `extra_model_paths.yaml` if present.
-- `custom-nodes.manifest`: one `name<TAB>origin-url<TAB>commit` line per
-  git-cloned node. Entries tracked by ComfyUI's own git (checked with
-  `git ls-files`) are excluded, so stock files like
-  `websocket_image_save.py` never leak into the manifest.
-- `custom_nodes_plain/`: full copies of non-git nodes (minus `__pycache__`).
-- `models.manifest`: `bytes<TAB>relpath` for every file under `models/`,
-  sorted. Models are NEVER archived; the live install's backup was 3.7M
-  against 74 GB of models. Safe while ComfyUI is serving.
-
-**restore (`cmd_restore`)**: order matters. Unpack to a mktemp stage (EXIT
-trap cleans it on failure) and check `format=1`; `cmd_install` if
-`INSTALL_DIR/.git` or the venv is missing (self-heals a half-gutted
-machine); `cmd_stop` unconditionally (it reports "not running" itself); merge `user/`, `input/`, `output/` (`cp -a` over the live
-tree); restore the two config files, saving a differing live copy aside as
-`.bak` first; custom nodes (plain copies, then manifest clones with a
-detached checkout of the pinned commit; every freshly restored node's
-`requirements.txt` is pip-installed, plain copies included; a checkout miss
-and a failed per-node `pip install -r` are warnings, not failed restores;
-clone and pip run with stdin from `/dev/null` so a prompting clone cannot
-eat the manifest lines the loop is reading); `apply_source_patches`, because node
-pip installs can clobber torch and the mods pass re-verifies it; finally
-diff `models.manifest` against disk and list every missing file with its
-size. Idempotent: restoring onto a healthy install reports everything
-present.
-
-**doctor**: an info line (not pass/fail) in the self section names the
-newest `backups/spark-backup-*.tgz` and its age in days, or prints
-`Backup: none in backups/ (run: spark-comfyui.sh backup)`. It only knows
-about the default `backups/` dir; backups taken with an explicit FILE
-argument elsewhere are invisible to it, which the wording reflects.
-
-**Source guard**: just before the dispatch block,
-`if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi`. Sourcing the
-script defines all functions and returns before dispatch, so test harnesses
-can source it and stub commands. Caveats: sourcing still runs the top-level
-code (env defaults, sourcing `mod_common.sh`), and `USER_CONTENT` is
-`readonly`, so sourcing twice in one shell errors.
+**doctor**: an info line names the newest `backups/spark-backup-*.tgz`
+and its age, or that none exists. Only knows the default `backups/` dir.
 
 ## GB10 domain knowledge (do not relitigate)
 
@@ -450,19 +372,19 @@ code (env defaults, sourcing `mod_common.sh`), and `USER_CONTENT` is
   mechanism, unaffected) plus `20-torch-repair`'s real
   `torch.cuda.is_available()` checks are the actual protection.
 
-## Containerization (container-dev branch, EXPERIMENTAL, the roadmap)
+## Containerization (THE architecture since the cut)
 
-The native path above becomes legacy once this matures. Local-only until
-ready: nothing container-related is pushed to GitHub yet, and container-dev
-deliberately has no upstream so a bare `git push` errors. Development home
-is `~/projects/spark-comfyui` (remotes: `origin` GitHub, `live` the old
-checkout at `~/spark-comfyui`, which is still the production install).
+`container/ROADMAP.md` is the decided architecture document and phase log;
+read it before re-deriving any of this. The cut (phase 3d) is complete on
+`container-dev`: the native path is deleted from the script, branch
+`legacy` (local) points at the last native release.
 
 Split: the image holds everything reproducible (ComfyUI at a pinned commit,
 venv with cu130 torch, native sm_121 SageAttention at SAGE_REF, the
 sha256-pinned onnxruntime wheel, build-time mods 05+10 applied via
 container/build-mods.sh reusing the mods/ contract). The USER_CONTENT set is
-bind-mounted by `container run` from this checkout's ComfyUI/ dirs. A named
+bind-mounted per the resolution contract (spark-mounts.conf > legacy tree >
+data/; `resolve_mounts` implements it, `status` prints it). A named
 volume `spark-comfyui-cache` at /home/comfy/.cache carries pip downloads and
 compiled sm_121 kernels across container recreation (CUDA_CACHE_PATH points
 into it); the mountpoint must exist in the image owned by comfy (uid 1000)
@@ -477,16 +399,15 @@ launch), mod 30 onto the mounted user/ dir, then main.py with the native
 flag set. Hardening on `container run`: non-root, cap-drop ALL,
 no-new-privileges, GPU only, --rm (stateless), 1 GB shm.
 
-Commands: `container build | run | stop | update [--rollback] | status |
-doctor | shell`. build resolves upstream master to a SHA and passes it as
-COMFY_SHA (the docker cache key: a ComfyUI bump rebuilds only from the
-clone layer; torch/Sage layers stay cached). update self-updates the tool
-first (SELF_UPDATE_RESUME makes self_update's re-exec land back in
-`container update`), rebuilds, and keeps the replaced image as :previous;
---rollback swaps :latest and :previous (toggles). status is
-quiet-when-healthy; its one warning is a running container whose image is
-no longer :latest. doctor runs the four live gates (torch+diag, sage
-kernel, onnx provider, kitchen NVFP4) inside a throwaway --gpus container.
+The build resolves upstream master to a SHA and passes it as COMFY_SHA
+(the docker cache key: a ComfyUI bump rebuilds only from the clone layer;
+torch/Sage stages stay cached; `--torch` busts the named torch stage via
+--no-cache-filter). update keeps the replaced image as :previous;
+--rollback swaps :latest and :previous (toggles; a tag swap, atomic).
+status is quiet-when-healthy; its one warning is a running container
+whose image is no longer :latest. doctor runs the four live gates
+(torch+diag, sage kernel, onnx provider, kitchen NVFP4) inside a
+throwaway --gpus container from the exact image run uses.
 
 Field-learned docker gotchas (do not re-derive):
 - The containerd image store garbage-collects a tagless image INSTANTLY.
@@ -506,61 +427,51 @@ Field-learned docker gotchas (do not re-derive):
 - .dockerignore whitelists the build context (script, mods/, container/):
   BASE_DIR on a live install holds 100+ GB next to the Dockerfile.
 
-Phase status: phases 1 (build/run/stop/shell), 2 (update/rollback/status/
-doctor), 3a (data/ layout, spark-mounts.conf, migrate) and 3b (lifecycle
-parity) implemented and field-verified on the GB10. 3b delivered:
-container install (no venv, no sudo; seeds both config templates),
-container service via docker restart policy (unless-stopped, --disable),
-update --torch via --no-cache-filter on the named torch stage, the patch
-list COPY'd into the build and merged by container/build-patches.sh (a
-changed list busts exactly the clone-down layers; a conflict fails the
-build loudly), container doctor grown host sections (driver, runtime,
-image age and comfy-sha label, rollback point, drift, swap, backup age),
-backup/restore layout-aware through content_root (single-root rule:
-per-entry mount overrides die loudly; container restores are content-only
-because the entrypoint installs requirements and verifies torch), and
-container reset (removes containers, all image tags, cache volume;
-rebuilds --no-cache; data/ never touched). The image now carries
-org.spark-comfyui.comfy-sha and sage-ref labels; backup meta reads the
-commit from the label when no checkout exists. 3c is DONE (2026-07-20): status
-and stop are container-aware (pgrep finds container processes in the host
-table unchanged; stop routes to docker stop first, since pkilling pid 1
-of a service-mode container would just trigger the restart policy;
-Versions reads the image label on checkout-less hosts; the Manager config
-line uses the resolved user mount), the watch needed NO pid changes and
-was field-verified under real load in both worlds (GEN/ITS/LAT/Q/HIT and
-CGPU all populated), and the CUTOVER GATE PASSED: Krea-2 Turbo 1MP 8
-steps, 4 gens per condition, fresh launch each, native first=29.8s
-steady=13.59s vs container first=28.9s steady=13.61s (0.15% delta, well
-inside the 3% threshold) and all four seed-matched output pairs are
-BIT-IDENTICAL (mean abs diff 0, max 0). The bench drove the production
-workflow extracted from an output PNG's embedded API prompt via POST
-/prompt with a fixed seed sequence. Native-path removal (3d: legacy
-update gate, legacy branch, README rewrite, major release) is unblocked.
-Phase 4 unchanged (slimming, GHCR, rootless, read-only rootfs).
+Phase status: 1 through 3d are COMPLETE and field-verified on the GB10
+(2026-07-19/20); see container/ROADMAP.md and the git log on container-dev
+for the per-phase detail. The cutover gate (3c) passed decisively: same
+Krea-2 Turbo workflow and seeds, fresh launch per condition, native
+first=29.8s steady=13.59s vs container first=28.9s steady=13.61s (0.15%
+steady delta against a 3% threshold), and all four seed-matched output
+pairs BIT-IDENTICAL (mean abs pixel diff 0, max 0). Bench method: the
+production workflow extracted from an output PNG's embedded API prompt,
+POSTed to /prompt with a fixed seed sequence, watch running. The cut (3d)
+removed the native path (972 lines), gated the upgrade cliff
+(check_legacy_layout in install/update), created the local `legacy`
+branch at v2026.07.19, and rewrote README and this file. PENDING: the
+release itself (merge to main, VERSION bump, tag, push, GitHub Release,
+push the legacy branch, forum post). Phase 4 unchanged (slimming, GHCR,
+rootless, read-only rootfs) plus one new item: per-entry mount-override
+support in backup/restore (content_root's single-root rule).
 
 ## Env var overrides
 
-- `INSTALL_DIR`, `VENV_DIR`, `SAGE_SRC`, `REPO_URL`, `PORT`, `TORCH_INDEX`,
-  `ORT_WHEEL_URL`, `PATCH_LIST`, `MODS_DIR`, `PIP_RETRIES`,
-  `PIP_DEFAULT_TIMEOUT`
+- `DATA_DIR` (content root, default `data/` next to the script),
+  `MOUNTS_CONF` (default `spark-mounts.conf`), `CONTAINER_IMAGE`,
+  `CONTAINER_NAME` (both default `spark-comfyui`)
+- `INSTALL_DIR`, `VENV_DIR`, `SAGE_SRC`: legacy-tree locations, used by
+  `migrate` and the legacy mount fallback only
+- `REPO_URL`, `PORT`, `TORCH_INDEX`, `ORT_WHEEL_URL`, `PATCH_LIST`,
+  `MODS_DIR` (all become build args or run-time wiring)
 - `SAGE_REF`: pinned SageAttention commit, see GB10 domain knowledge
-- `SPARK_BF16` (default 1)
-- `SPARK_STATIC_VRAM` (default 0). Caveat: with SageAttention this can hang a
-  second sampling pass on GB10, open ComfyUI issue #13920.
-- `SPARK_SOURCE_PATCHES` (default 1). 0 disables all six mods, not just
-  source patches.
+- `SPARK_BF16` (default 1), `SPARK_STATIC_VRAM` (default 0, ComfyUI issue
+  #13920 caveat): passed into the container by `run`/`service`
 - `SPARK_SELF_UPDATE` (default 1). 0 stops `update` from git-pulling the
   spark-comfyui repo itself.
+- Gone since the cut: `SPARK_SOURCE_PATCHES` (the host-side mod pass it
+  toggled no longer exists; mods apply at image build and in the
+  entrypoint), `PIP_RETRIES`/`PIP_DEFAULT_TIMEOUT` as user knobs (pip runs
+  inside the build/container).
 
 ## Patch list (separate from mods)
 
-`comfyui-patches.list` next to the script lets users merge upstream
-PRs/branches on top of master onto a rebuilt-fresh `spark-patched` branch
-each update. Format: `pr:<N>` | `branch:<name>` | `remote:<url> <branch>`.
-A commented template is seeded on first install. As of mid-2026 the big
-Spark PRs are merged upstream, so the default (empty) list means plain
-master tracking, which is optimal.
+`comfyui-patches.list` next to the script (template seeded by `install`)
+merges PRs/branches on top of the pinned upstream commit INSIDE the image
+build (`container/build-patches.sh`, on a `spark-patched` branch). Format:
+`pr:<N>` | `branch:<name>` | `remote:<url> <branch>`. A changed list busts
+exactly the clone-down layers; a merge conflict fails the build loudly. As
+of mid-2026 the big Spark PRs are merged upstream, so the default (empty)
+list means plain master tracking, which is optimal.
 
 ## Development workflow that has worked
 
@@ -572,9 +483,10 @@ dry-run the transform on a fixture and `ast.parse` the result first.
 
 ## Likely next tasks / open threads
 
-- Watch for ComfyUI refactors that move `get_free_memory`. Mod 10 will report
-  `skipped:anchor-not-found` in `doctor` if so, and the transform's
-  regex/anchor needs updating.
+- Watch for ComfyUI refactors that move `get_free_memory`. Mod 10 reports
+  `skipped:anchor-not-found` if so, which since the cut FAILS THE IMAGE
+  BUILD (build-mods.sh dies on a failed verify) — loud by design; the
+  transform's regex/anchor then needs updating.
 - Mod `20-no-double-vram` was retired (2026-07): upstream moved the
   `weight = weight.to(device=device_to)` line it patched out of
   `comfy/utils.py` entirely, into `comfy/model_management.py`'s `cast_to()` /
