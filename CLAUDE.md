@@ -26,9 +26,10 @@ cannot touch the host).
 Author/owner: GitHub `bjarkebolding`. Development home:
 `~/projects/spark-comfyui` on host `sparky` (sole remote: `origin`
 GitHub). Published: https://github.com/bjarkebolding/spark-comfyui.
-Current version: **2026.07.20.2**. The last native (pre-container)
-release is the v2026.07.19 tag; the migration tooling lives in the
-v2026.07.20 tag only. MIT licensed, shellcheck-clean.
+Current version: **2026.07.20.3**. Only the newest tag and GitHub
+Release are kept; older tags and release pages were removed on
+2026-07-20 (the git history is the archive). MIT licensed,
+shellcheck-clean.
 
 ## Versioning and releasing
 
@@ -117,9 +118,9 @@ self-updates the tool first (`self_update`: ff-only pull, re-exec once;
 `SELF_UPDATE_RESUME` makes the re-exec land back in the container
 update). `install`, `update` and `restore` refuse to run over a
 native-era layout (`check_legacy_layout`: a ComfyUI checkout where
-data/ should be) and point at the v2026.07.20 tag (migrate) or the
-v2026.07.19 tag (stay native). Without that gate, install would create
-an empty data/ and silently shadow a native user's content.
+data/ should be) and print the move commands (five renames into data/)
+inline. Without that gate, install would create an empty data/ and
+silently shadow a native user's content.
 
 ## The container architecture
 

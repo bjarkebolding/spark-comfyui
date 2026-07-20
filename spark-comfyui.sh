@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.07.20.2 | License: MIT
+#  Version 2026.07.20.3 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -67,9 +67,8 @@
 #                              nuclear option; your content (data/) is
 #                              never touched.
 #
-#  Upgrading from a pre-container (native) install: the migration tooling
-#  lives in the v2026.07.20 tag (git checkout v2026.07.20, run 'migrate',
-#  return to main), or stay native on the v2026.07.19 tag.
+#  Upgrading from a pre-container (native) install: 'install' detects the
+#  old layout and prints the move commands (five renames into data/).
 #
 #  Mounts: data/ holds models, user, input, output, custom_nodes. Override
 #  per-entry paths or add extra mounts (e.g. a NAS share) in
@@ -86,7 +85,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.07.20.2"
+VERSION="2026.07.20.3"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -1173,20 +1172,22 @@ container path under /opt/ComfyUI — got: '$val'"
   done
 }
 
-# A native-era layout (pre-v2026.07.20) has a ComfyUI checkout where data/
-# should be. The migration tooling shipped in v2026.07.20 only; point
-# there instead of carrying it forever. Without this gate, install would
-# create an empty data/ and silently shadow the user's content.
+# A native-era layout (pre-container) has a ComfyUI checkout where data/
+# should be. The move is five renames, so the gate carries the
+# instructions itself. Without it, install would create an empty data/
+# and silently shadow the user's content.
 check_legacy_layout() {
   [[ -d "$BASE_DIR/ComfyUI/.git" && ! -d "$DATA_DIR" ]] || return 0
   die "a native-era install layout was detected (ComfyUI checkout, no data/).
-This version no longer carries the migration tooling. Either migrate with
-the version that does:
-  git checkout v2026.07.20
-  $0 migrate --keep-legacy
-  git checkout main
+This version keeps all content in data/. Move yours first (instant
+renames; run from $BASE_DIR):
+  mkdir -p data
+  mv ComfyUI/models ComfyUI/user ComfyUI/input ComfyUI/output \\
+     ComfyUI/custom_nodes data/ 2>/dev/null
+  mv ComfyUI/extra_model_paths.yaml data/ 2>/dev/null
 then re-run: $0 install
-Or stay native on the last native release: git checkout v2026.07.19"
+The old ComfyUI/, comfyui-env/ and SageAttention/ trees are reproducible;
+delete them once you are satisfied."
 }
 
 # The single directory holding the whole USER_CONTENT set: the legacy
