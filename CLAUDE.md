@@ -450,6 +450,70 @@ code (env defaults, sourcing `mod_common.sh`), and `USER_CONTENT` is
   mechanism, unaffected) plus `20-torch-repair`'s real
   `torch.cuda.is_available()` checks are the actual protection.
 
+## Containerization (container-dev branch, EXPERIMENTAL, the roadmap)
+
+The native path above becomes legacy once this matures. Local-only until
+ready: nothing container-related is pushed to GitHub yet, and container-dev
+deliberately has no upstream so a bare `git push` errors. Development home
+is `~/projects/spark-comfyui` (remotes: `origin` GitHub, `live` the old
+checkout at `~/spark-comfyui`, which is still the production install).
+
+Split: the image holds everything reproducible (ComfyUI at a pinned commit,
+venv with cu130 torch, native sm_121 SageAttention at SAGE_REF, the
+sha256-pinned onnxruntime wheel, build-time mods 05+10 applied via
+container/build-mods.sh reusing the mods/ contract). The USER_CONTENT set is
+bind-mounted by `container run` from this checkout's ComfyUI/ dirs. A named
+volume `spark-comfyui-cache` at /home/comfy/.cache carries pip downloads and
+compiled sm_121 kernels across container recreation (CUDA_CACHE_PATH points
+into it); the mountpoint must exist in the image owned by comfy (uid 1000)
+or docker creates it root-owned and pip/uv fail.
+
+`container/entrypoint.sh` is the runtime half of the mod system, every
+start: custom-node requirements reinstall (container layer is ephemeral;
+runs BEFORE the torch guard because node installs are what clobber torch),
+mod 20 prerun with torch_cuda_diag, the live SageAttention kernel gate
+(builds have no GPU, so golden rule 3 lives here; failure refuses to
+launch), mod 30 onto the mounted user/ dir, then main.py with the native
+flag set. Hardening on `container run`: non-root, cap-drop ALL,
+no-new-privileges, GPU only, --rm (stateless), 1 GB shm.
+
+Commands: `container build | run | stop | update [--rollback] | status |
+doctor | shell`. build resolves upstream master to a SHA and passes it as
+COMFY_SHA (the docker cache key: a ComfyUI bump rebuilds only from the
+clone layer; torch/Sage layers stay cached). update self-updates the tool
+first (SELF_UPDATE_RESUME makes self_update's re-exec land back in
+`container update`), rebuilds, and keeps the replaced image as :previous;
+--rollback swaps :latest and :previous (toggles). status is
+quiet-when-healthy; its one warning is a running container whose image is
+no longer :latest. doctor runs the four live gates (torch+diag, sage
+kernel, onnx provider, kitchen NVFP4) inside a throwaway --gpus container.
+
+Field-learned docker gotchas (do not re-derive):
+- The containerd image store garbage-collects a tagless image INSTANTLY.
+  cmd_container_update therefore holds `:pre-update` on the old image
+  through the build and promotes it to :previous only on a real change.
+- buildx provenance attestations stamp each build's manifest with the build
+  time, so identical cached builds got different "image IDs" until
+  `--provenance=false`. Without it, update's changed-vs-current comparison
+  always says changed.
+- Base image pinned to the CUDA 13.0 patch line (13.0.3): the r580 driver
+  and cu130 torch wheels are 13.0-era, and a 13.1+ ptxas can emit PTX the
+  driver JIT rejects. Bumping past 13.0.x is a deliberate pin change with a
+  field test, same policy as SAGE_REF.
+- The stock GLSL nodes (comfy_extras/nodes_glsl.py) dlopen bundled ANGLE
+  libs that link libX11/libXext/libxcb even headless; those apt packages
+  are in the image for that reason alone.
+- .dockerignore whitelists the build context (script, mods/, container/):
+  BASE_DIR on a live install holds 100+ GB next to the Dockerfile.
+
+Phase status: phase 1 (build/run/stop/shell) and phase 2 (update/rollback/
+status/doctor) implemented and field-verified on the GB10. Phase 3 open:
+image slimming (multi-stage), port-binding choice (127.0.0.1 vs LAN),
+restore parity for container-only installs, README/docs, release plan.
+backup already works against a container install as-is (it never touches
+the venv); restore works but its self-heal path still runs the NATIVE
+cmd_install.
+
 ## Env var overrides
 
 - `INSTALL_DIR`, `VENV_DIR`, `SAGE_SRC`, `REPO_URL`, `PORT`, `TORCH_INDEX`,

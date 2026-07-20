@@ -57,7 +57,7 @@
 #                              inputs, outputs and custom nodes. The nuclear
 #                              option for when doctor's fixes don't stick.
 #    service                   Install + start a systemd user service.
-#    container build|run|stop|shell
+#    container build|run|stop|update|status|doctor|shell
 #                              EXPERIMENTAL containerized runtime (the
 #                              roadmap; the native path above becomes
 #                              legacy once this matures). 'build' bakes an
@@ -67,6 +67,13 @@
 #                              bind-mounted from this install. Custom-node
 #                              code runs confined: no host files beyond the
 #                              mounts, dropped capabilities.
+#                              'update' rebuilds the image on current
+#                              upstream (cached layers make it fast) and
+#                              keeps the old image as :previous; --rollback
+#                              swaps back to it. 'status' shows image,
+#                              container, mounts and cache volume. 'doctor'
+#                              runs the GPU gates (torch/Sage/onnx/NVFP4)
+#                              inside a throwaway container.
 #
 #  Typical day: install once -> run -> update now and then.
 #  Something feels wrong? -> doctor tells you what and how to fix it.
@@ -503,7 +510,11 @@ not self-updating. Reconcile manually: git -C $BASE_DIR pull"
   log "Updating spark-comfyui itself: ${local_rev:0:8} -> ${upstream_rev:0:8}"
   if git -C "$BASE_DIR" merge -q --ff-only "$upstream_rev" 2>/dev/null; then
     echo "Re-running update with the new version..."
-    SPARK_SELF_UPDATED=1 exec "$SELF" update "$@"
+    # SELF_UPDATE_RESUME lets a caller name the command to re-exec into
+    # (cmd_container_update sets "container update"); default is the native
+    # update. Deliberately unquoted: the value may be multiple words.
+    # shellcheck disable=SC2086
+    SPARK_SELF_UPDATED=1 exec "$SELF" ${SELF_UPDATE_RESUME:-update} "$@"
   else
     warn "self-update could not fast-forward (uncommitted local edits in
 $BASE_DIR?) — continuing with the current version. To update manually:
@@ -2151,7 +2162,14 @@ unreachable) — check the network and re-run: $0 container build"
   log "Building $CONTAINER_IMAGE:$date_tag (ComfyUI ${comfy_sha:0:12}, SageAttention ${SAGE_REF:0:12})"
   echo "  First build downloads torch (>1 GB) and compiles SageAttention"
   echo "  (10-30 min). Rebuilds reuse every layer that didn't change."
+  # --provenance=false: buildx otherwise attaches a provenance attestation
+  # stamped with the build time, giving every build a fresh manifest digest
+  # even when all layers are cached and the content is identical — which
+  # breaks cmd_container_update's changed-vs-current comparison
+  # (field-diagnosed 2026-07-20: two builds, same config timestamp,
+  # different "image IDs").
   docker build \
+    --provenance=false \
     -f "$BASE_DIR/container/Dockerfile" \
     --build-arg TORCH_INDEX="$TORCH_INDEX" \
     --build-arg REPO_URL="$REPO_URL" \
@@ -2218,15 +2236,177 @@ cmd_container_shell() {
     || die "could not exec into $CONTAINER_NAME — is it running? ($0 container run)"
 }
 
+cmd_container_update() {
+  local rollback=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --rollback) rollback=1 ;;
+      *) die "Unknown container update option: $arg" ;;
+    esac
+  done
+  need_docker
+
+  if (( rollback )); then
+    docker image inspect "$CONTAINER_IMAGE:previous" >/dev/null 2>&1 \
+      || die "no $CONTAINER_IMAGE:previous image — nothing to roll back to
+(the tag appears after the first 'container update' that changes the image)"
+    local cur prev
+    cur="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
+    prev="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:previous")"
+    if [[ "$cur" == "$prev" ]]; then
+      info "latest and previous are the same image — nothing to roll back"
+      return 0
+    fi
+    docker tag "$CONTAINER_IMAGE:previous" "$CONTAINER_IMAGE:latest"
+    [[ -n "$cur" ]] && docker tag "$cur" "$CONTAINER_IMAGE:previous"
+    log "Rolled back: $CONTAINER_IMAGE:latest is now ${prev:7:12}"
+    echo "  (:previous now holds the image you rolled back FROM, so running"
+    echo "  'container update --rollback' again toggles forward.)"
+    echo "  Restart to pick it up: $0 container stop && $0 container run"
+    return 0
+  fi
+
+  # Self-update the tool first, same as the native update; the resume hook
+  # makes the post-update re-exec land back here instead of in cmd_update.
+  local SELF_UPDATE_RESUME="container update"
+  self_update "$@"
+
+  # Hold a temp tag on the current image through the build: the rebuild
+  # moves :latest and the date tag to the new image, and the containerd
+  # image store garbage-collects a tagless image INSTANTLY (field-hit
+  # 2026-07-20: tagging :previous after the build found the old image
+  # already gone). Promote the temp tag to :previous only on a real change,
+  # so an unchanged rebuild never clobbers an older rollback point.
+  local before after
+  before="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
+  [[ -n "$before" ]] && docker tag "$before" "$CONTAINER_IMAGE:pre-update"
+  cmd_container_build
+  after="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:latest")"
+  if [[ "$before" == "$after" ]]; then
+    [[ -n "$before" ]] && docker rmi "$CONTAINER_IMAGE:pre-update" >/dev/null
+    log "Already current — the rebuild produced the same image"
+  else
+    if [[ -n "$before" ]]; then
+      docker tag "$CONTAINER_IMAGE:pre-update" "$CONTAINER_IMAGE:previous"
+      docker rmi "$CONTAINER_IMAGE:pre-update" >/dev/null
+      log "Updated. The old image stays as $CONTAINER_IMAGE:previous"
+      echo "  Roll back with: $0 container update --rollback"
+    else
+      log "Updated (first image — nothing previous to keep)"
+    fi
+  fi
+  if [[ -n "$(docker ps -q -f "name=^${CONTAINER_NAME}$")" ]]; then
+    warn "the running container still uses the old image — restart to pick up
+the update: $0 container stop && $0 container run"
+  fi
+}
+
+cmd_container_status() {
+  need_docker
+  echo
+  echo "== image =="
+  if docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1; then
+    docker images "$CONTAINER_IMAGE" \
+      --format '{{.Tag}}\t{{.ID}}\t{{.Size}}\t(created {{.CreatedSince}})' \
+      | expand -t 14,28,38 | sed 's/^/  /'
+  else
+    echo "  none — run: $0 container build"
+  fi
+  echo
+  echo "== container =="
+  local cid
+  cid="$(docker ps -q -f "name=^${CONTAINER_NAME}$")"
+  if [[ -n "$cid" ]]; then
+    docker ps -f "id=$cid" --format '{{.Names}}: {{.Status}}, port {{.Ports}}' \
+      | sed 's/^/  /'
+    # Quiet when healthy: only flag when the running image is not :latest
+    # (i.e. an update happened under a running server).
+    local running_img latest_img
+    running_img="$(docker inspect -f '{{.Image}}' "$cid")"
+    latest_img="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
+    if [[ -n "$latest_img" && "$running_img" != "$latest_img" ]]; then
+      warn "running an image that is no longer :latest — restart to pick up
+the update: $0 container stop && $0 container run"
+    fi
+    echo
+    echo "== mounts =="
+    docker inspect "$cid" \
+      --format '{{range .Mounts}}{{.Type}}{{"\t"}}{{.Source}}{{"\t"}}-> {{.Destination}}{{"\n"}}{{end}}' \
+      | sed '/^$/d' | expand -t 8,64 | sed 's/^/  /'
+  else
+    echo "  not running — start: $0 container run"
+  fi
+  echo
+  echo "== cache volume =="
+  if docker volume inspect "$CONTAINER_IMAGE-cache" >/dev/null 2>&1; then
+    echo "  $CONTAINER_IMAGE-cache (pip + compiled CUDA kernels; safe to"
+    echo "  delete at the cost of a slower next start)"
+  else
+    echo "  none yet (created on first 'container run')"
+  fi
+}
+
+cmd_container_doctor() {
+  need_docker
+  docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1 \
+    || die "image $CONTAINER_IMAGE:latest not found — run: $0 container build"
+  log "Running the GPU gates inside a throwaway container"
+  # Same live gates the native doctor runs, executed in the image itself:
+  # what passes here is exactly what the entrypoint will see at launch.
+  docker run --rm -i --gpus all --entrypoint bash "$CONTAINER_IMAGE:latest" -s <<'EOS'
+set -uo pipefail
+ok()   { printf '  \033[1;32m[PASS]\033[0m %s\n' "$*"; }
+bad()  { printf '  \033[1;31m[FAIL]\033[0m %s\n' "$*"; fails=$((fails+1)); }
+log()  { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
+warn() { printf '\033[1;33m[warn] %s\033[0m\n' "$*"; }
+die()  { printf '\033[1;31m[error] %s\033[0m\n' "$*" >&2; exit 1; }
+info() { printf '  \033[1;36m[info]\033[0m %s\n' "$*"; }
+fails=0
+source /opt/spark/mods/_lib/mod_common.sh
+
+log "torch / CUDA"
+if python - <<'PY'
+import torch
+print(f"  torch {torch.__version__} | compiled CUDA {torch.version.cuda}")
+assert (torch.version.cuda or "").startswith("13")
+assert torch.cuda.is_available()
+cap = torch.cuda.get_device_capability(0)
+print(f"  device: {torch.cuda.get_device_name(0)} | sm_{cap[0]}{cap[1]}")
+PY
+then ok "torch is the cu130 CUDA build and sees the GPU"
+else torch_cuda_diag; bad "torch cannot use the GPU — the diag lines above name the cause"
+fi
+
+log "SageAttention (live kernel)"
+if sage_kernel_ok; then ok "sm_121 kernel runs"
+else bad "kernel failed — rebuild the image (container build)"; fi
+
+log "onnxruntime GPU"
+if onnx_gpu_ok; then ok "CUDAExecutionProvider available"
+else bad "GPU provider missing — rebuild the image (container build)"; fi
+
+log "NVFP4 (comfy-kitchen forced cuda backend)"
+if kitchen_nvfp4_ok; then ok "forced NVFP4 quantize+matmul passed"
+else bad "NVFP4 gate failed on the cuda backend"; fi
+
+echo
+if [[ "$fails" -eq 0 ]]; then echo "All container gates passed."
+else echo "$fails gate(s) FAILED."; exit 1; fi
+EOS
+}
+
 cmd_container() {
   local sub="${1:-}"
   shift || true
   case "$sub" in
-    build) cmd_container_build "$@" ;;
-    run)   cmd_container_run "$@" ;;
-    stop)  cmd_container_stop ;;
-    shell) cmd_container_shell ;;
-    *) die "Unknown container subcommand: ${sub:-<none>} (try: container build | run | stop | shell)" ;;
+    build)  cmd_container_build "$@" ;;
+    run)    cmd_container_run "$@" ;;
+    stop)   cmd_container_stop ;;
+    shell)  cmd_container_shell ;;
+    update) cmd_container_update "$@" ;;
+    status) cmd_container_status ;;
+    doctor) cmd_container_doctor ;;
+    *) die "Unknown container subcommand: ${sub:-<none>} (try: container build | run | stop | update | status | doctor | shell)" ;;
   esac
 }
 
