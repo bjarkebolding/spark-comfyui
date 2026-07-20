@@ -548,7 +548,13 @@ dry-run the transform on a fixture and `ast.parse` the result first.
 - Consider a GitHub issue template that asks for `spark-comfyui.sh doctor`
   output. For this project that one command is nearly a complete bug report.
 
-## Release history (one line per release; details live in the GitHub Releases)
+## Release history (one line per release)
+
+Older release pages were deleted on 2026-07-20; only the newest release
+stays published. This list and the git tags ARE the history now, so keep
+the entries here complete. The checklist below still publishes a GitHub
+Release per new version; on the next release, delete the one it
+supersedes.
 
 - **v1.0.0** (2026-07-10): first public release.
 - **v1.1.0** (2026-07-10): backup-revert bug fix; runtime-fallback and
