@@ -120,16 +120,56 @@ ENV INSTALL_DIR=/opt/ComfyUI
 ENV VENV_DIR=/opt/comfyui-env
 RUN bash /opt/spark/build-mods.sh
 
+# --------------------------------------------------------------------------
+# Slim runtime stage (phase 4). Everything above runs in the devel context;
+# the shipped image is this one: plain ubuntu + the venv + ComfyUI + the
+# spark scripts. What the devel base provided and the runtime still needs:
+#  - ptxas (31 MB, copied): Triton JITs kernels at runtime and torch's
+#    bundled ptxas is pre-CUDA-13 (can't target sm_121, triton#10331).
+#  - NVRTC: NOT copied — the cu130 wheels bundle nvidia-cuda-nvrtc in the
+#    venv nowadays (verified in-image 2026-07-20).
+# build-essential and python3-dev stay: the entrypoint pip-installs
+# custom-node requirements at start, and an sdist dep needs a compiler.
+# The SageAttention build tree is NOT copied (246 MB of build residue; the
+# compiled package lives in the venv).
+FROM ubuntu:24.04 AS runtime
+ARG UID
+ARG COMFY_SHA
+ARG SAGE_REF
+ARG TORCH_INDEX
+ARG ORT_WHEEL_URL
+ENV DEBIAN_FRONTEND=noninteractive
+# The X client libs are for ComfyUI's stock GLSL nodes (bundled ANGLE
+# links libX11/libXext/libxcb even headless); git is for Manager's node
+# installs inside the container.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates python3 python3-venv python3-dev python3-pip \
+      build-essential \
+      libx11-6 libxext6 libxcb1 \
+    && rm -rf /var/lib/apt/lists/*
+RUN userdel -r ubuntu 2>/dev/null || true \
+ && useradd -m -u ${UID} comfy \
+ && mkdir -p /opt && chown comfy:comfy /opt
+
+COPY --from=final --chown=comfy:comfy /opt/comfyui-env /opt/comfyui-env
+COPY --from=final --chown=comfy:comfy /opt/ComfyUI /opt/ComfyUI
+COPY --from=final --chown=comfy:comfy /opt/spark /opt/spark
+COPY --from=base /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
+
+USER comfy
 # The cache volume mounts at /home/comfy/.cache; the dir must exist in the
 # image OWNED BY comfy, or docker creates the mountpoint (and initializes a
-# fresh named volume) as root and pip/uv/CUDA all fail to write. Placed late
-# so editing it never invalidates the expensive layers above.
+# fresh named volume) as root and pip/uv/CUDA all fail to write.
 RUN mkdir -p /home/comfy/.cache/pip /home/comfy/.cache/uv /home/comfy/.cache/nv-compute
 
-# Runtime environment, mirroring the native cmd_run: 4 GB CUDA kernel cache
-# (redirected into the cache volume so compiled sm_121 kernels survive
-# container recreation), NCCL P2P off, Triton pointed at CUDA 13's ptxas.
-ENV SAGE_SRC=/opt/SageAttention \
+# Runtime environment, mirroring the native-era cmd_run: 4 GB CUDA kernel
+# cache (redirected into the cache volume so compiled sm_121 kernels
+# survive container recreation), NCCL P2P off, Triton pointed at the
+# copied CUDA 13 ptxas.
+ENV VIRTUAL_ENV=/opt/comfyui-env \
+    PATH=/opt/comfyui-env/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    INSTALL_DIR=/opt/ComfyUI \
+    VENV_DIR=/opt/comfyui-env \
     SAGE_REF=${SAGE_REF} \
     SAGE_MARKER=/opt/comfyui-env/.sage_ok \
     TORCH_INDEX=${TORCH_INDEX} \

@@ -29,7 +29,7 @@ Hardware in use: DGX Spark, hostname `sparky`. Development home:
 `~/projects/spark-comfyui` (sole remote: `origin` GitHub; the old native
 install was deleted 2026-07-20 and content starts from a blank slate).
 Published: https://github.com/bjarkebolding/spark-comfyui.
-Current version: **2026.07.20.1**. No legacy branch: the last native
+Current version: **2026.07.20.2**. No legacy branch: the last native
 release is reachable as the v2026.07.19 tag, and the migration tooling
 lives in the v2026.07.20 tag only. MIT licensed, shellcheck-clean.
 
@@ -252,9 +252,11 @@ not work, hence `tune --clock-cap`).
 One shared definition of "user content": the readonly `USER_CONTENT` array
 (`models user input output custom_nodes extra_model_paths.yaml`), resolved
 to host paths by `resolve_mounts` (a spark-mounts.conf key wins, else
-`DATA_DIR/<entry>`). `content_root` returns `DATA_DIR` after verifying no
-per-entry override scatters the set — backup/restore do not support
-scattered roots yet, and half a backup must never look like a whole one.
+`DATA_DIR/<entry>`), read per entry with `_mount_path`. Per-entry
+overrides are fully supported since 2026.07.20.2: archives always carry
+entry names (user/, input/, output/ enter the tar through stage-dir
+symlinks with -h, which also dereferences symlinks inside them), and
+restore merges each entry into its resolved path.
 
 **reset (`cmd_container_reset`)**: content is outside the image by design,
 so reset only removes what is reproducible: the container, every image
@@ -340,8 +342,10 @@ and its age, or that none exists. Only knows the default `backups/` dir.
 - **Overcurrent reboots**: some units hard-reboot (no logs) on the ~85W power
   spike at denoise start. `tune --clock-cap 2100` caps clocks (nvidia-smi -pl
   is N/A on GB10). `status --watch` captures the pre-crash telemetry.
-- **NVRTC**: aarch64 cu130 wheels bundle none, so torch uses the system CUDA
-  13 lib, which is the GOOD state. `doctor` distinguishes the four cases.
+- **NVRTC**: current cu130 wheels bundle it (pip nvidia-cuda-nvrtc,
+  verified in-image 2026-07-20; earlier aarch64 wheels bundled none). The
+  slim runtime image relies on the bundled one and carries no system CUDA
+  beyond a copied ptxas (Triton's JIT needs a CUDA-13 ptxas, triton#10331).
 - **Dependency pins**: torch pins `setuptools<82`; never blindly upgrade
   setuptools. `ensure_setuptools_compat` (wrapped by mod
   `05-setuptools-compat`) reads torch's own constraint. `doctor` runs
@@ -425,9 +429,15 @@ POSTed to /prompt with a fixed seed sequence, watch running. The cut (3d)
 removed the native path (972 lines), gated the upgrade cliff
 (check_legacy_layout in install/update), created the local `legacy`
 branch at v2026.07.19, and rewrote README and this file. RELEASED as
-v2026.07.20 (2026-07-20). Phase 4 unchanged (slimming, GHCR, rootless,
-read-only rootfs) plus one new item: per-entry mount-override support in
-backup/restore (content_root's single-root rule).
+v2026.07.20 (2026-07-20), consolidated in v2026.07.20.1. Phase 4 progress
+(2026-07-20): image slimming DONE — a final `runtime` stage on plain
+ubuntu:24.04 (venv + ComfyUI + spark scripts + a copied ptxas; NVRTC
+comes from the pip wheels; build tools kept for sdist node deps; the
+SageAttention build tree not copied) halved the image, 22.4 to 11.3 GB,
+all four GPU gates and a live launch green. Per-entry mount-override
+support in backup/restore DONE (_mount_path replaced content_root).
+Remaining phase 4, all needing a decision or host changes: GHCR prebuilt
+images (CI + supply chain), rootless docker, read-only rootfs.
 
 ## Env var overrides
 
@@ -619,6 +629,15 @@ dry-run the transform on a fixture and `ast.parse` the result first.
   tag — without it, install would create an empty data/ and silently
   shadow a native user's content. Suite rewritten (15 assertions), fresh
   blank-slate launch field-verified.
+- **2026.07.20.2**: phase 4 pair. Slim runtime image: final stage on
+  plain ubuntu:24.04 with the venv, ComfyUI, the spark scripts and a
+  copied CUDA-13 ptxas (NVRTC now ships in the cu130 pip wheels; build
+  tools kept so sdist node deps still compile; the SageAttention build
+  tree stays behind). 22.4 GB to 11.3 GB, all four GPU gates plus a live
+  launch verified on the slim image. And per-entry spark-mounts.conf
+  overrides are now honored by backup/restore: _mount_path per entry,
+  archives keyed by entry name via symlink-staged tar -h, restore merges
+  into resolved paths; the single-root refusal is gone.
 
 ## Release checklist (repeat per release)
 

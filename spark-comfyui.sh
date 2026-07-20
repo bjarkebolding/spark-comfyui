@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.07.20.1 | License: MIT
+#  Version 2026.07.20.2 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -86,7 +86,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.07.20.1"
+VERSION="2026.07.20.2"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -889,10 +889,11 @@ cmd_backup() {
           out="$1"; shift ;;
     esac
   done
-  # Content root: the legacy checkout or data/ (container-only layout).
-  local root
-  root="$(content_root)"
-  [[ -d "$root" ]] || die "no content at $root — nothing to back up"
+  resolve_mounts
+  local mp_models mp_user mp_input mp_output mp_nodes mp_yaml
+  mp_models="$(_mount_path models)"       mp_user="$(_mount_path user)"
+  mp_input="$(_mount_path input)"         mp_output="$(_mount_path output)"
+  mp_nodes="$(_mount_path custom_nodes)"  mp_yaml="$(_mount_path extra_model_paths.yaml)"
   if [[ -z "$out" ]]; then
     mkdir -p "$BASE_DIR/backups"
     out="$BASE_DIR/backups/spark-backup-$(date +%Y%m%d-%H%M%S).tgz"
@@ -918,15 +919,14 @@ cmd_backup() {
   } > "$stage/meta"
 
   [[ -f "$PATCH_LIST" ]] && cp -a "$PATCH_LIST" "$stage/comfyui-patches.list"
-  [[ -f "$root/extra_model_paths.yaml" ]] \
-    && cp -a "$root/extra_model_paths.yaml" "$stage/extra_model_paths.yaml"
+  [[ -f "$mp_yaml" ]] && cp -a "$mp_yaml" "$stage/extra_model_paths.yaml"
 
   # Custom nodes: git clones become manifest lines (url + commit, re-cloned on
   # restore); non-git entries are copied whole. "User-installed" = not tracked
   # by ComfyUI's own git (stock files like websocket_image_save.py are).
   : > "$stage/custom-nodes.manifest"
   local entry name url sha
-  if [[ -d "$root/custom_nodes" ]]; then
+  if [[ -d "$mp_nodes" ]]; then
     while IFS= read -r entry; do
       name="$(basename "$entry")"
       [[ "$name" == "__pycache__" ]] && continue
@@ -938,12 +938,12 @@ cmd_backup() {
         mkdir -p "$stage/custom_nodes_plain"
         cp -a "$entry" "$stage/custom_nodes_plain/$name"
       fi
-    done < <(find "$root/custom_nodes" -mindepth 1 -maxdepth 1 2>/dev/null)
+    done < <(find "$mp_nodes" -mindepth 1 -maxdepth 1 2>/dev/null)
   fi
 
   # Models are manifested (size + relative path), never copied.
-  if [[ -d "$root/models" ]]; then
-    find "$root/models" -type f -printf '%s\t%P\n' | sort -k2 > "$stage/models.manifest"
+  if [[ -d "$mp_models" ]]; then
+    find "$mp_models" -type f -printf '%s\t%P\n' | sort -k2 > "$stage/models.manifest"
   else
     : > "$stage/models.manifest"
   fi
@@ -951,19 +951,26 @@ cmd_backup() {
   # user/, input/ and output/ are tarred straight from the live tree (no
   # staging copy of possibly-large dirs): tar excludes the logs and caches,
   # --ignore-failed-read plus tolerating exit 1 (a file changed or vanished
-  # mid-read) is what makes "safe while ComfyUI is serving" true.
+  # mid-read) is what makes "safe while ComfyUI is serving" true. They
+  # enter the archive through stage-dir symlinks with -h (dereference), so
+  # a per-entry mount override still lands under its entry name. Symlinks
+  # INSIDE the dirs are dereferenced too as a side effect; for
+  # settings/workflow trees that is acceptable.
   local members=(-C "$stage" meta models.manifest custom-nodes.manifest)
   [[ -f "$stage/comfyui-patches.list" ]]   && members+=(comfyui-patches.list)
   [[ -f "$stage/extra_model_paths.yaml" ]] && members+=(extra_model_paths.yaml)
   [[ -d "$stage/custom_nodes_plain" ]]     && members+=(custom_nodes_plain)
-  members+=(-C "$root")
-  [[ -d "$root/user" ]] && members+=(user)
-  [[ -d "$root/input" ]] \
-    && [[ -n "$(find "$root/input" -mindepth 1 -print -quit)" ]] \
-    && members+=(input)
-  [[ "$with_output" -eq 1 && -d "$root/output" ]] && members+=(output)
+  if [[ -d "$mp_user" ]]; then
+    ln -s "$mp_user" "$stage/user"; members+=(user)
+  fi
+  if [[ -d "$mp_input" && -n "$(find "$mp_input" -mindepth 1 -print -quit)" ]]; then
+    ln -s "$mp_input" "$stage/input"; members+=(input)
+  fi
+  if [[ "$with_output" -eq 1 && -d "$mp_output" ]]; then
+    ln -s "$mp_output" "$stage/output"; members+=(output)
+  fi
   local rc=0
-  tar -czf "$out" --exclude='__pycache__' --exclude='*.log' \
+  tar -czhf "$out" --exclude='__pycache__' --exclude='*.log' \
     --ignore-failed-read "${members[@]}" || rc=$?
   [[ "$rc" -le 1 ]] || die "tar failed (exit $rc) writing $out"
   [[ "$rc" -eq 1 ]] && warn "some files changed while being archived (ComfyUI serving?) — they may be stale in this backup"
@@ -989,8 +996,7 @@ cmd_restore() {
     || die "not a spark-comfyui backup (meta lacks format=1): $archive"
   sed 's/^/  /' "$stage/meta"
 
-  local root
-  root="$(content_root)"
+  resolve_mounts
   need_docker
   check_legacy_layout
   if ! docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1; then
@@ -999,12 +1005,15 @@ cmd_restore() {
   fi
   cmd_container_stop
 
+  # Archive members carry entry names; each restores into its RESOLVED
+  # host path, so per-entry mount overrides are honored.
   log "Merging user state"
-  local d
+  local d mp
   for d in user input output; do
     [[ -d "$stage/$d" ]] || continue
-    mkdir -p "$root/$d"
-    cp -a "$stage/$d/." "$root/$d/"
+    mp="$(_mount_path "$d")"
+    mkdir -p "$mp"
+    cp -a "$stage/$d/." "$mp/"
     echo "  merged $d/"
   done
   local src dst
@@ -1012,7 +1021,7 @@ cmd_restore() {
     src="$stage/$d"
     [[ -f "$src" ]] || continue
     case "$d" in
-      extra_model_paths.yaml) dst="$root/$d" ;;
+      extra_model_paths.yaml) dst="$(_mount_path extra_model_paths.yaml)" ;;
       comfyui-patches.list)   dst="$PATCH_LIST" ;;
       *) continue ;;   # a list entry without a case arm must not reuse $dst
     esac
@@ -1025,15 +1034,17 @@ cmd_restore() {
   done
 
   log "Restoring custom nodes"
-  mkdir -p "$root/custom_nodes"
+  local nodes_dir
+  nodes_dir="$(_mount_path custom_nodes)"
+  mkdir -p "$nodes_dir"
   local entry name url sha ndir
   if [[ -d "$stage/custom_nodes_plain" ]]; then
     while IFS= read -r entry; do
       name="$(basename "$entry")"
-      if [[ -e "$root/custom_nodes/$name" ]]; then
+      if [[ -e "$nodes_dir/$name" ]]; then
         echo "  = $name (present)"
       else
-        cp -a "$entry" "$root/custom_nodes/$name"
+        cp -a "$entry" "$nodes_dir/$name"
         echo "  + $name (plain copy)"
       fi
     done < <(find "$stage/custom_nodes_plain" -mindepth 1 -maxdepth 1)
@@ -1048,7 +1059,7 @@ cmd_restore() {
         .|..|*/*)
           warn "manifest names invalid node '$name' — skipped"; continue ;;
       esac
-      ndir="$root/custom_nodes/$name"
+      ndir="$nodes_dir/$name"
       if [[ -e "$ndir" ]]; then
         echo "  = $name (present)"
         continue
@@ -1074,6 +1085,8 @@ cmd_restore() {
   info "node requirements and the torch guard run in the container entrypoint at next start"
 
   log "Models check (against the archive's manifest)"
+  local models_dir
+  models_dir="$(_mount_path models)"
   local missing_count=0 missing_bytes=0 size relpath
   if [[ -f "$stage/models.manifest" ]]; then
     while IFS=$'\t' read -r size relpath; do
@@ -1081,7 +1094,7 @@ cmd_restore() {
       # A corrupt manifest line must not kill the restore via the size
       # arithmetic below (set -e); treat the size as unknown instead.
       [[ "$size" =~ ^[0-9]+$ ]] || size=0
-      [[ -f "$root/models/$relpath" ]] && continue
+      [[ -f "$models_dir/$relpath" ]] && continue
       printf '  missing: %s (%s)\n' "$relpath" "$(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B")"
       missing_count=$((missing_count + 1))
       missing_bytes=$((missing_bytes + size))
@@ -1182,16 +1195,19 @@ Or stay native on the last native release: git checkout v2026.07.19"
 # overrides scatter the set across parents, which backup/restore do not
 # support yet; that dies loudly instead of silently archiving half the
 # content.
-content_root() {
-  resolve_mounts
+# Resolved host path for one USER_CONTENT entry (resolve_mounts must have
+# run in this shell). backup/restore go through this, so per-entry
+# spark-mounts.conf overrides are honored: the archive always uses entry
+# names, wherever the entries live on the host.
+_mount_path() {
   local i
   for i in "${!RESOLVED_ENTRIES[@]}"; do
-    [[ "${RESOLVED_PATHS[$i]}" == "$DATA_DIR/${RESOLVED_ENTRIES[$i]}" ]] \
-      || die "backup/restore do not support per-entry mount overrides yet:
-${RESOLVED_ENTRIES[$i]} resolves to ${RESOLVED_PATHS[$i]} (outside $DATA_DIR).
-Remove the override from $MOUNTS_CONF for this operation."
+    if [[ "${RESOLVED_ENTRIES[$i]}" == "$1" ]]; then
+      echo "${RESOLVED_PATHS[$i]}"
+      return 0
+    fi
   done
-  echo "$DATA_DIR"
+  return 1
 }
 
 seed_mounts_conf() {
