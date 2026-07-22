@@ -14,19 +14,45 @@ die()  { printf '\033[1;31m[error] %s\033[0m\n' "$*" >&2; exit 1; }
 cd "$INSTALL_DIR"
 
 # 1. Custom-node requirements. Manager clones nodes into the mounted
-#    custom_nodes dir, but their pip deps land in the container layer and
-#    vanish on recreation, so re-install on every start. The pip cache
-#    volume makes this cheap after the first pass. A failing node is a
-#    warning, not a dead server — same policy as restore.
+#    custom_nodes dir, but their pip deps land in the container's writable
+#    layer and vanish on recreation, so a fresh container must install them.
+#    A RESTARTED container (service restart policy, reboots) still has
+#    them; the marker lives in /tmp — the same writable layer, so it dies
+#    exactly when the installed packages die and can never wrongly skip on
+#    a fresh container. All requirement files go to pip in one invocation
+#    (one resolver pass instead of one per node); a failure falls back to
+#    per-node installs to isolate the culprit. A failing node is a warning,
+#    not a dead server — same policy as restore.
 log "Custom-node requirements"
 shopt -s nullglob
-for req in "$INSTALL_DIR"/custom_nodes/*/requirements.txt; do
-  node="$(basename "$(dirname "$req")")"
-  info "custom node $node: installing requirements"
-  pip install -q -r "$req" </dev/null \
-    || warn "pip install for custom node $node failed — the node may not load"
-done
+req_files=("$INSTALL_DIR"/custom_nodes/*/requirements.txt)
 shopt -u nullglob
+marker=/tmp/spark-node-reqs.sha256
+if (( ${#req_files[@]} == 0 )); then
+  info "no custom nodes with requirements"
+elif [[ -f "$marker" ]] \
+     && [[ "$(sha256sum "${req_files[@]}")" == "$(cat "$marker")" ]]; then
+  info "requirements unchanged since this container's last start — skipping"
+else
+  rm -f "$marker"
+  info "installing requirements for ${#req_files[@]} custom node(s)"
+  pip_args=()
+  for req in "${req_files[@]}"; do pip_args+=(-r "$req"); done
+  if pip install -q "${pip_args[@]}" </dev/null; then
+    sha256sum "${req_files[@]}" > "$marker"
+  else
+    warn "combined install failed — retrying per node to isolate it"
+    req_fail=0
+    for req in "${req_files[@]}"; do
+      node="$(basename "$(dirname "$req")")"
+      info "custom node $node: installing requirements"
+      pip install -q -r "$req" </dev/null \
+        || { warn "pip install for custom node $node failed — the node may not load"; req_fail=1; }
+    done
+    # No marker after a failure: every start retries until the set heals.
+    (( req_fail )) || sha256sum "${req_files[@]}" > "$marker"
+  fi
+fi
 
 # shellcheck disable=SC1091
 source /opt/spark/mods/_lib/mod_common.sh

@@ -1613,6 +1613,16 @@ cmd_container_doctor() {
     csha="$(docker image inspect -f '{{index .Config.Labels "org.spark-comfyui.comfy-sha"}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
     created="$(docker image inspect -f '{{.Created}}' "$CONTAINER_IMAGE:latest" | cut -dT -f1)"
     ok "image $CONTAINER_IMAGE:latest (built $created, ComfyUI ${csha:0:12})"
+    local upsha
+    upsha="$(timeout 10 git ls-remote "$REPO_URL" refs/heads/master 2>/dev/null \
+      | awk 'NR==1{print $1}')"
+    if [[ -z "$upsha" ]]; then
+      info "upstream ComfyUI unreachable — image staleness unknown"
+    elif [[ "$upsha" == "$csha" ]]; then
+      info "image is at upstream ComfyUI master HEAD"
+    else
+      info "upstream ComfyUI master has moved (now ${upsha:0:12}) — a rebuild picks it up: $0 update"
+    fi
     docker image inspect "$CONTAINER_IMAGE:previous" >/dev/null 2>&1 \
       && info "rollback point present ($CONTAINER_IMAGE:previous)" \
       || info "no rollback point yet (:previous appears after the first changing update)"
