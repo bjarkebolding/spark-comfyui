@@ -26,7 +26,7 @@ cannot touch the host).
 Author/owner: GitHub `bjarkebolding`. Development home:
 `~/projects/spark-comfyui` on host `sparky` (sole remote: `origin`
 GitHub). Published: https://github.com/bjarkebolding/spark-comfyui.
-Current version: **2026.07.22.2**. Only the newest tag and GitHub
+Current version: **2026.07.22.3**. Only the newest tag and GitHub
 Release are kept; older tags and release pages were removed on
 2026-07-20 (the git history is the archive). MIT licensed,
 shellcheck-clean.
@@ -378,8 +378,10 @@ restore is content-only by construction.
 ## Env var overrides
 
 - `DATA_DIR` (content root, default `data/`), `MOUNTS_CONF` (default
-  `spark-mounts.conf`), `CONTAINER_IMAGE`, `CONTAINER_NAME` (both
-  default `spark-comfyui`)
+  `spark-mounts.conf`; the `--mounts PATH` global flag is its flag form,
+  scanned out of argv before dispatch so it reaches every command and
+  never `main.py`), `CONTAINER_IMAGE`, `CONTAINER_NAME` (both default
+  `spark-comfyui`)
 - `REPO_URL`, `PORT`, `TORCH_INDEX`, `ORT_WHEEL_URL`, `PATCH_LIST`,
   `MODS_DIR` (become build args or run-time wiring)
 - `SAGE_REF`: pinned SageAttention commit, see GB10 domain knowledge

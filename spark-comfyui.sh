@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.07.22.2 | License: MIT
+#  Version 2026.07.22.3 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -67,13 +67,21 @@
 #                              nuclear option; your content (data/) is
 #                              never touched.
 #
+#  Global options:
+#    --mounts PATH             Use PATH as the mounts config for this
+#                              invocation instead of spark-mounts.conf.
+#                              Works with any command, so several setups
+#                              can be tested side by side. Equivalent to
+#                              MOUNTS_CONF=PATH. The file must exist.
+#
 #  Upgrading from a pre-container (native) install: 'install' detects the
 #  old layout and prints the move commands (five renames into data/).
 #
 #  Mounts: data/ holds models, user, input, output, custom_nodes. Override
 #  per-entry paths or add extra mounts (e.g. a NAS share) in
 #  spark-mounts.conf — a commented template is seeded on install, and
-#  'status' always shows the resolved table. Custom-node code runs
+#  'status' always shows the resolved table. Point --mounts at another
+#  file to switch the whole set for one invocation. Custom-node code runs
 #  confined: non-root, no capabilities, nothing mounted but your content.
 #
 #  Typical day: install once -> run (or service) -> update now and then.
@@ -85,7 +93,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.07.22.2"
+VERSION="2026.07.22.3"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -1331,6 +1339,15 @@ _container_run_args() {
 
 cmd_container_run() {
   need_docker
+  if [[ -n "$(docker ps -q -f "name=^${CONTAINER_NAME}$")" ]]; then
+    die "container $CONTAINER_NAME is already running — stop it first: $0 stop
+(or watch it: docker logs -f $CONTAINER_NAME)"
+  fi
+  # A STOPPED leftover with the same name blocks the new run: 'service'
+  # containers are not --rm, so 'service' then 'stop' then 'run' would fail
+  # on the name. A running one was handled above, so removing here is safe.
+  # Same guard 'service' carries.
+  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   _container_run_args
   log "Launching containerized ComfyUI on port $PORT (Ctrl-C stops it)"
   # --rm: every launch starts from the immutable image; runtime pip state
@@ -1679,6 +1696,35 @@ EOS
 # Sourced rather than executed (test harnesses source this file for its
 # function definitions): stop here, never dispatch.
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
+
+# --mounts PATH: use a different mounts config for this invocation, the flag
+# form of MOUNTS_CONF. Scanned out of the argument list before dispatch, so
+# it works with every command, in any position, and never reaches main.py
+# through 'run'. Strict about the path on purpose: naming a config that is
+# not there is a typo, and silently falling back to defaults would mount the
+# wrong content — the same reasoning as the mount validation in
+# resolve_mounts.
+_argv=() _mounts_flag=""
+while (( $# )); do
+  case "$1" in
+    --mounts)
+      shift
+      (( $# )) || die "--mounts needs a path to a mounts config file"
+      _mounts_flag="$1"
+      ;;
+    --mounts=*) _mounts_flag="${1#*=}" ;;
+    *)          _argv+=("$1") ;;
+  esac
+  shift
+done
+set -- "${_argv[@]}"
+if [[ -n "$_mounts_flag" ]]; then
+  [[ -f "$_mounts_flag" ]] || die "--mounts: no such file: $_mounts_flag
+(a named config must exist; refusing to fall back to defaults silently)"
+  MOUNTS_CONF="$(readlink -f "$_mounts_flag")"
+fi
+unset _argv _mounts_flag
+
 CMD="${1:-}"
 shift || true
 # Banner on every invocation; --version excepted (kept one-line parseable).

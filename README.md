@@ -89,13 +89,14 @@ mount = /mnt/nas/sdxl-models:/opt/ComfyUI/models/nas:ro
 
 `status` always prints the resolved table. A typo in a `mount =` line dies loudly instead of silently shadowing your data with an empty directory. Point `extra_model_paths.yaml` entries at the container side of `mount =` lines.
 
-Relative paths resolve against the config file's own directory. For several setups, keep one file each and select with `MOUNTS_CONF`:
+Relative paths resolve against the config file's own directory. For several setups, keep one file each and pick one per invocation with `--mounts`:
 
 ```bash
-MOUNTS_CONF=./nas-profile.conf ./spark-comfyui.sh run
+./spark-comfyui.sh --mounts ./nas-profile.conf run
+./spark-comfyui.sh --mounts ./nas-profile.conf status   # check what it resolves to
 ```
 
-Use the same variable on `backup` and `restore` so they act on that profile. To run two profiles at once, add `CONTAINER_NAME` and `PORT` overrides.
+The flag works with every command and must name a file that exists, so a typo fails loudly instead of quietly mounting the defaults. `MOUNTS_CONF=PATH` does the same thing as an environment variable. Use it on `backup` and `restore` too so they act on that setup. To run two setups at once, add `CONTAINER_NAME` and `PORT` overrides.
 
 ## Patch list (optional)
 
