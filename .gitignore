@@ -31,3 +31,4 @@ spark-mounts.conf
 
 # Claude Code's own per-machine local settings (tool-permission allowlist)
 .claude/
+tests/
