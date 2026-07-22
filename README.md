@@ -89,7 +89,9 @@ mount = /mnt/nas/sdxl-models:/opt/ComfyUI/models/nas:ro
 
 `status` always prints the resolved table. A typo in a `mount =` line dies loudly instead of silently shadowing your data with an empty directory. Point `extra_model_paths.yaml` entries at the container side of `mount =` lines.
 
-Relative paths resolve against the config file's own directory. For several setups, keep one file each and pick one per invocation with `--mounts`:
+Absolute paths are used as given and `~` is expanded. A configured directory does not have to exist yet, but its parent must, so a typo or an unmounted share fails loudly instead of quietly mounting an empty directory. Relative paths resolve against the config file's own directory.
+
+For several setups, keep one file each and pick one per invocation with `--mounts`:
 
 ```bash
 ./spark-comfyui.sh --mounts ./nas-profile.conf run

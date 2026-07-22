@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.07.22.3 | License: MIT
+#  Version 2026.07.22.4 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -93,7 +93,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.07.22.3"
+VERSION="2026.07.22.4"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -1143,6 +1143,22 @@ cmd_restore() {
 # spark-mounts.conf key wins, else DATA_DIR/<entry>. Fills
 # RESOLVED_ENTRIES/RESOLVED_PATHS (parallel arrays) and EXTRA_MOUNTS
 # (HOST:CONTAINER[:ro] strings, validated).
+# A config file is not shell, so '~' in it is a literal character. Expand a
+# leading ~ or ~/ here: writing 'models = ~/big/models' is the natural thing
+# to do, and without this it resolved to a literal '~' directory next to the
+# config file, which then got auto-created and mounted EMPTY.
+_expand_tilde() {
+  # SC2088 fires on the ~ patterns below. It is the point: these MATCH a
+  # literal tilde that came from a file (where the shell never expands it)
+  # and substitute $HOME by hand.
+  # shellcheck disable=SC2088
+  case "$1" in
+    "~")   printf '%s\n' "$HOME" ;;
+    "~/"*) printf '%s\n' "$HOME/${1#\~/}" ;;
+    *)     printf '%s\n' "$1" ;;
+  esac
+}
+
 resolve_mounts() {
   RESOLVED_ENTRIES=() RESOLVED_PATHS=() EXTRA_MOUNTS=()
   local -A conf=()
@@ -1156,17 +1172,20 @@ resolve_mounts() {
       line="${line%"${line##*[![:space:]]}"}"
       [[ -z "$line" ]] && continue
       [[ "$line" == *=* ]] \
-        || die "spark-mounts.conf: not a KEY = PATH line: '$line'"
+        || die "$MOUNTS_CONF: not a KEY = PATH line: '$line'"
       key="${line%%=*}"; key="${key%"${key##*[![:space:]]}"}"
       val="${line#*=}";  val="${val#"${val%%[![:space:]]*}"}"
-      [[ -n "$val" ]] || die "spark-mounts.conf: empty path for '$key'"
+      [[ -n "$val" ]] || die "$MOUNTS_CONF: empty path for '$key'"
       if [[ "$key" == "mount" ]]; then
         [[ "$val" == *:/opt/ComfyUI/* ]] \
-          || die "spark-mounts.conf: mount must be HOST:CONTAINER[:ro] with the
+          || die "$MOUNTS_CONF: mount must be HOST:CONTAINER[:ro] with the
 container path under /opt/ComfyUI — got: '$val'"
         local mhost="${val%%:*}"
+        local mrest="${val#*:}"
+        mhost="$(_expand_tilde "$mhost")"
+        val="$mhost:$mrest"
         [[ -e "$mhost" ]] \
-          || die "spark-mounts.conf: mount host path does not exist: $mhost
+          || die "$MOUNTS_CONF: mount host path does not exist: $mhost
 (refusing to invent an empty dir — a typo must not silently shadow your data)"
         EXTRA_MOUNTS+=("$val")
         continue
@@ -1176,8 +1195,19 @@ container path under /opt/ComfyUI — got: '$val'"
         [[ "$key" == "$entry" ]] && known=1
       done
       [[ "$known" == 1 ]] \
-        || die "spark-mounts.conf: unknown key '$key' (valid: ${USER_CONTENT[*]}, mount)"
+        || die "$MOUNTS_CONF: unknown key '$key' (valid: ${USER_CONTENT[*]}, mount)"
+      val="$(_expand_tilde "$val")"
       [[ "$val" == /* ]] || val="$conf_dir/$val"
+      # An explicitly configured path must be real or creatable. If neither
+      # it nor its parent exists it is a typo or an unmounted share, and
+      # mounting it would auto-create an empty dir that silently shadows the
+      # content the user meant to use — the failure the 'mount =' rule above
+      # exists to prevent. Unconfigured entries keep auto-creating: that is
+      # how the data/ skeleton appears on a fresh install.
+      [[ -e "$val" || -d "$(dirname "$val")" ]] \
+        || die "$MOUNTS_CONF: '$key' points at $val
+but neither it nor its parent directory exists (typo, or a share that is not
+mounted?). Create the parent first, or fix the path."
       conf["$key"]="$val"
     done < "$MOUNTS_CONF"
   fi
@@ -1234,9 +1264,12 @@ seed_mounts_conf() {
   [[ -f "$MOUNTS_CONF" ]] && return 0
   cat > "$MOUNTS_CONF" <<'EOF'
 # spark-mounts.conf — where the container finds your content.
-# Uncommented lines are KEY = PATH. Relative paths resolve against this
-# file's directory. Without overrides everything lives under data/ next to
-# the script. 'status' always shows the resolved table.
+# Uncommented lines are KEY = PATH. Absolute paths are used as given, ~ is
+# expanded, and relative paths resolve against this file's directory. The
+# path itself may be missing (it gets created), but its parent must exist,
+# so a typo or an unmounted share fails loudly instead of mounting empty.
+# Without overrides everything lives under data/ next to the script.
+# 'status' always shows the resolved table.
 #
 # Per-entry overrides (keys match the content set exactly):
 # models = /mnt/fast-ssd/models
@@ -1327,7 +1360,9 @@ _container_run_args() {
     if [[ "$entry" == *.yaml ]]; then
       [[ -f "$host" ]] && CRUN_ARGS+=(-v "$host:/opt/ComfyUI/$entry:ro")
     else
-      mkdir -p "$host"
+      mkdir -p "$host" 2>/dev/null \
+        || die "cannot create the '$entry' mount path: $host
+(permission denied, or a parent that is not writable) — check $MOUNTS_CONF"
       CRUN_ARGS+=(-v "$host:/opt/ComfyUI/$entry")
     fi
   done

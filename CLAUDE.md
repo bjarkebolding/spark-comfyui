@@ -26,7 +26,7 @@ cannot touch the host).
 Author/owner: GitHub `bjarkebolding`. Development home:
 `~/projects/spark-comfyui` on host `sparky` (sole remote: `origin`
 GitHub). Published: https://github.com/bjarkebolding/spark-comfyui.
-Current version: **2026.07.22.3**. Only the newest tag and GitHub
+Current version: **2026.07.22.4**. Only the newest tag and GitHub
 Release are kept; older tags and release pages were removed on
 2026-07-20 (the git history is the archive). MIT licensed,
 shellcheck-clean.
@@ -129,10 +129,13 @@ the sha256-pinned onnxruntime wheel, build-time mods). The USER_CONTENT
 set (`models user input output custom_nodes extra_model_paths.yaml`) is
 bind-mounted per the resolution contract: a spark-mounts.conf key wins,
 else `DATA_DIR/<entry>`. `resolve_mounts` implements it, `_mount_path`
-reads single entries, `status` prints the resolved table. Extra
-`mount = HOST:CONTAINER[:ro]` lines are validated: host must exist (a
-typo must not silently shadow a NAS with an empty dir), container path
-must be under /opt/ComfyUI.
+reads single entries, `status` prints the resolved table. Config values
+get `~` expanded by hand (a config file is not shell, so the shell never
+does it) and are validated: a configured entry may not exist yet, but its
+parent must, and extra `mount = HOST:CONTAINER[:ro]` lines need an
+existing host path and a container path under /opt/ComfyUI. One rule
+behind all of it: a typo must fail loudly, never auto-create an empty
+directory that shadows the content the user meant to mount.
 
 Dockerfile stages: `base` (apt, uid-1000 user) → `torch` (venv + cu130
 wheels) → `sage` (SageAttention compile, no GPU needed) → `final`
