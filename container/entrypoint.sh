@@ -67,7 +67,7 @@ log "Torch CUDA guard"
   source "$MOD_DIR/run.sh"
   mod_prerun
 ) || die "torch CUDA check failed — see the diag lines above. If the wheel
-set itself is broken, rebuild the image: spark-comfyui.sh container build"
+set itself is broken, rebuild the image: spark-comfyui.sh update"
 
 # 3. SageAttention live kernel gate. The image build compiled it blind (no
 #    GPU exists at build time); this is where golden rule 3 now lives.
@@ -77,7 +77,7 @@ if sage_kernel_ok; then
   info "SageAttention enabled (kernel verified live)"
 else
   die "SageAttention kernel FAILED on this GPU — refusing to launch degraded.
-Rebuild the image: spark-comfyui.sh container build"
+Rebuild the image: spark-comfyui.sh update"
 fi
 
 # 4. Manager config lives under the bind-mounted user/ dir, so it must be

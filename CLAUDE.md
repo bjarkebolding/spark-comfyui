@@ -108,8 +108,7 @@ docker's storage. `backup` writes to `backups/` (gitignored).
 `update [--torch|--rollback]` · `doctor` · `status [--watch [SEC]]` ·
 `tune [--clock-cap MHZ] [--persist]` · `backup [--with-output] [FILE]` ·
 `restore FILE` · `reset [--yes]` · `shell` · `--version`. Hidden
-aliases: the `container <verb>` spellings from the dev phase, `verify`,
-`monitor`, `rollback`.
+aliases: `verify`, `monitor`, `rollback`.
 
 Mental model, also printed in `--help`: install once (image build), then
 run or service; update now and then (cached rebuild plus a `:previous`
@@ -165,7 +164,7 @@ architecture itself).
 
 Field-learned docker gotchas (do not re-derive):
 - The containerd image store garbage-collects a tagless image INSTANTLY.
-  `container update` therefore holds `:pre-update` on the old image
+  `update` therefore holds `:pre-update` on the old image
   through the build and promotes it to `:previous` only on a real change.
 - buildx provenance attestations stamp each build's manifest with the
   build time, so identical cached builds get different image IDs unless

@@ -130,8 +130,7 @@ PATCH_LIST="${PATCH_LIST:-$BASE_DIR/comfyui-patches.list}"
 # off with SPARK_SOURCE_PATCHES=0.
 MODS_DIR="${MODS_DIR:-$BASE_DIR/mods}"
 
-# Containerized runtime (EXPERIMENTAL, `container` subcommands): image and
-# container name, both overridable.
+# Container runtime: image and container name, both overridable.
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-spark-comfyui}"
 CONTAINER_NAME="${CONTAINER_NAME:-spark-comfyui}"
 # Container-only layout: all user content under one
@@ -239,11 +238,7 @@ not self-updating. Reconcile manually: git -C $BASE_DIR pull"
   log "Updating spark-comfyui itself: ${local_rev:0:8} -> ${upstream_rev:0:8}"
   if git -C "$BASE_DIR" merge -q --ff-only "$upstream_rev" 2>/dev/null; then
     echo "Re-running update with the new version..."
-    # SELF_UPDATE_RESUME lets a caller name the command to re-exec into
-    # (cmd_container_update sets "container update"); default is the native
-    # update. Deliberately unquoted: the value may be multiple words.
-    # shellcheck disable=SC2086
-    SPARK_SELF_UPDATED=1 exec "$SELF" ${SELF_UPDATE_RESUME:-update} "$@"
+    SPARK_SELF_UPDATED=1 exec "$SELF" update "$@"
   else
     warn "self-update could not fast-forward (uncommitted local edits in
 $BASE_DIR?) — continuing with the current version. To update manually:
@@ -1254,7 +1249,7 @@ cmd_container_build() {
     | awk 'NR==1{print $1}')"
   [[ -n "$comfy_sha" ]] \
     || die "could not resolve ComfyUI master from $REPO_URL (offline or
-unreachable) — check the network and re-run: $0 container build"
+unreachable) — check the network and re-run"
   local date_tag; date_tag="$(date +%Y.%m.%d)"
   log "Building $CONTAINER_IMAGE:$date_tag (ComfyUI ${comfy_sha:0:12}, SageAttention ${SAGE_REF:0:12})"
   echo "  First build downloads torch (>1 GB) and compiles SageAttention"
@@ -1278,7 +1273,7 @@ unreachable) — check the network and re-run: $0 container build"
     "$@" \
     "$BASE_DIR"
   log "Image ready: $CONTAINER_IMAGE:latest (also tagged :$date_tag)"
-  echo "  Launch it: $0 container run"
+  echo "  Launch it: $0 run"
 }
 
 # Shared docker-run argument assembly for cmd_container_run (foreground,
@@ -1289,7 +1284,7 @@ unreachable) — check the network and re-run: $0 container build"
 # mounted when it exists (docker would create a dir).
 _container_run_args() {
   docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1 \
-    || die "image $CONTAINER_IMAGE:latest not found — run: $0 container build"
+    || die "image $CONTAINER_IMAGE:latest not found — run: $0 install"
   resolve_mounts
   CRUN_ARGS=(
     --name "$CONTAINER_NAME"
@@ -1344,7 +1339,7 @@ cmd_container_service() {
   fi
   [[ -z "${1:-}" ]] || die "Unknown container service option: $1 (valid: --disable)"
   if [[ -n "$(docker ps -q -f "name=^${CONTAINER_NAME}$")" ]]; then
-    info "container $CONTAINER_NAME is already running ($0 container stop to stop it)"
+    info "container $CONTAINER_NAME is already running ($0 stop to stop it)"
     return 0
   fi
   # A stopped leftover with the same name (e.g. a previously disabled
@@ -1357,8 +1352,8 @@ cmd_container_service() {
     "$CONTAINER_IMAGE:latest" >/dev/null
   echo "  Running detached on port $PORT; survives crashes and reboots."
   echo "  Logs:    docker logs -f $CONTAINER_NAME"
-  echo "  Stop:    $0 container stop   (docker restarts it on next boot)"
-  echo "  Disable: $0 container service --disable"
+  echo "  Stop:    $0 stop   (docker restarts it on next boot)"
+  echo "  Disable: $0 service --disable"
 }
 
 # Container-world install: no venv, no apt, no sudo. Preflight, seed the
@@ -1377,10 +1372,10 @@ cmd_container_install() {
   cat <<EOF
 
   Content root:     $DATA_DIR   (mounts: $MOUNTS_CONF)
-  Start ComfyUI:    $0 container run     (foreground)
-        or:         $0 container service (background, survives reboots)
-  Health check:     $0 container doctor
-  Update later:     $0 container update
+  Start ComfyUI:    $0 run     (foreground)
+        or:         $0 service (background, survives reboots)
+  Health check:     $0 doctor
+  Update later:     $0 update
   Web UI:           http://${ip_hint:-<spark-ip>}:$PORT
   Models go in:     $DATA_DIR/models/checkpoints (etc.)
 EOF
@@ -1394,7 +1389,7 @@ cmd_container_reset() {
   local yes=0
   [[ "${1:-}" == "--yes" ]] && yes=1
   if [[ "$yes" != 1 ]]; then
-    [[ -t 0 ]] || die "stdin is not a terminal — re-run with: $0 container reset --yes"
+    [[ -t 0 ]] || die "stdin is not a terminal — re-run with: $0 reset --yes"
     echo "  This removes the container, ALL $CONTAINER_IMAGE image tags and the"
     echo "  cache volume, then rebuilds the image from scratch (no cache,"
     echo "  including the 10-30 min SageAttention compile)."
@@ -1431,7 +1426,7 @@ cmd_container_stop() {
 cmd_container_shell() {
   need_docker
   docker exec -it "$CONTAINER_NAME" bash \
-    || die "could not exec into $CONTAINER_NAME — is it running? ($0 container run)"
+    || die "could not exec into $CONTAINER_NAME — is it running? ($0 run)"
 }
 
 cmd_container_update() {
@@ -1440,7 +1435,7 @@ cmd_container_update() {
     case "$arg" in
       --rollback) rollback=1 ;;
       --torch)    torch=1 ;;
-      *) die "Unknown container update option: $arg" ;;
+      *) die "Unknown update option: $arg" ;;
     esac
   done
   need_docker
@@ -1449,7 +1444,7 @@ cmd_container_update() {
   if (( rollback )); then
     docker image inspect "$CONTAINER_IMAGE:previous" >/dev/null 2>&1 \
       || die "no $CONTAINER_IMAGE:previous image — nothing to roll back to
-(the tag appears after the first 'container update' that changes the image)"
+(the tag appears after the first 'update' that changes the image)"
     local cur prev
     cur="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
     prev="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:previous")"
@@ -1461,14 +1456,12 @@ cmd_container_update() {
     [[ -n "$cur" ]] && docker tag "$cur" "$CONTAINER_IMAGE:previous"
     log "Rolled back: $CONTAINER_IMAGE:latest is now ${prev:7:12}"
     echo "  (:previous now holds the image you rolled back FROM, so running"
-    echo "  'container update --rollback' again toggles forward.)"
-    echo "  Restart to pick it up: $0 container stop && $0 container run"
+    echo "  'update --rollback' again toggles forward.)"
+    echo "  Restart to pick it up: $0 stop && $0 run"
     return 0
   fi
 
-  # Self-update the tool first, same as the native update; the resume hook
-  # makes the post-update re-exec land back here instead of in cmd_update.
-  local SELF_UPDATE_RESUME="container update"
+  # Self-update the tool first; its re-exec lands back in this update.
   self_update "$@"
 
   # Hold a temp tag on the current image through the build: the rebuild
@@ -1495,14 +1488,14 @@ cmd_container_update() {
       docker tag "$CONTAINER_IMAGE:pre-update" "$CONTAINER_IMAGE:previous"
       docker rmi "$CONTAINER_IMAGE:pre-update" >/dev/null
       log "Updated. The old image stays as $CONTAINER_IMAGE:previous"
-      echo "  Roll back with: $0 container update --rollback"
+      echo "  Roll back with: $0 update --rollback"
     else
       log "Updated (first image — nothing previous to keep)"
     fi
   fi
   if [[ -n "$(docker ps -q -f "name=^${CONTAINER_NAME}$")" ]]; then
     warn "the running container still uses the old image — restart to pick up
-the update: $0 container stop && $0 container run"
+the update: $0 stop && $0 run"
   fi
 }
 
@@ -1515,7 +1508,7 @@ cmd_container_status() {
       --format '{{.Tag}}\t{{.ID}}\t{{.Size}}\t(created {{.CreatedSince}})' \
       | expand -t 14,28,38 | sed 's/^/  /'
   else
-    echo "  none — run: $0 container build"
+    echo "  none — run: $0 install"
   fi
   echo
   echo "== container =="
@@ -1531,7 +1524,7 @@ cmd_container_status() {
     latest_img="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
     if [[ -n "$latest_img" && "$running_img" != "$latest_img" ]]; then
       warn "running an image that is no longer :latest — restart to pick up
-the update: $0 container stop && $0 container run"
+the update: $0 stop && $0 run"
     fi
     echo
     echo "== mounts =="
@@ -1539,7 +1532,7 @@ the update: $0 container stop && $0 container run"
       --format '{{range .Mounts}}{{.Type}}{{"\t"}}{{.Source}}{{"\t"}}-> {{.Destination}}{{"\n"}}{{end}}' \
       | sed '/^$/d' | expand -t 8,64 | sed 's/^/  /'
   else
-    echo "  not running — start: $0 container run"
+    echo "  not running — start: $0 run"
   fi
   echo
   echo "== configured mounts (resolved) =="
@@ -1561,7 +1554,7 @@ the update: $0 container stop && $0 container run"
     echo "  $CONTAINER_IMAGE-cache (pip + compiled CUDA kernels; safe to"
     echo "  delete at the cost of a slower next start)"
   else
-    echo "  none yet (created on first 'container run')"
+    echo "  none yet (created on first 'run')"
   fi
 }
 
@@ -1627,7 +1620,7 @@ cmd_container_doctor() {
       && info "rollback point present ($CONTAINER_IMAGE:previous)" \
       || info "no rollback point yet (:previous appears after the first changing update)"
   else
-    bad "image $CONTAINER_IMAGE:latest missing — run: $0 container build"
+    bad "image $CONTAINER_IMAGE:latest missing — run: $0 install"
   fi
   local cid
   cid="$(docker ps -q -f "name=^${CONTAINER_NAME}$")"
@@ -1636,7 +1629,7 @@ cmd_container_doctor() {
     running_img="$(docker inspect -f '{{.Image}}' "$cid")"
     latest_img="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
     if [[ -n "$latest_img" && "$running_img" != "$latest_img" ]]; then
-      bad "running container uses an outdated image — restart: $0 container stop && $0 container run"
+      bad "running container uses an outdated image — restart: $0 stop && $0 run"
     else
       ok "container running ($(docker ps -f "id=$cid" --format '{{.Status}}'))"
     fi
@@ -1667,7 +1660,7 @@ cmd_container_doctor() {
   fi
 
   docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1 \
-    || die "image missing — the GPU gates need it; run: $0 container build"
+    || die "image missing — the GPU gates need it; run: $0 install"
   log "Running the GPU gates inside a throwaway container"
   # Same live gates the native doctor runs, executed in the image itself:
   # what passes here is exactly what the entrypoint will see at launch.
@@ -1698,11 +1691,11 @@ fi
 
 log "SageAttention (live kernel)"
 if sage_kernel_ok; then ok "sm_121 kernel runs"
-else bad "kernel failed — rebuild the image (container build)"; fi
+else bad "kernel failed — rebuild the image (spark-comfyui.sh update)"; fi
 
 log "onnxruntime GPU"
 if onnx_gpu_ok; then ok "CUDAExecutionProvider available"
-else bad "GPU provider missing — rebuild the image (container build)"; fi
+else bad "GPU provider missing — rebuild the image (spark-comfyui.sh update)"; fi
 
 log "NVFP4 (comfy-kitchen forced cuda backend)"
 if kitchen_nvfp4_ok; then ok "forced NVFP4 quantize+matmul passed"
@@ -1719,24 +1712,6 @@ EOS
     echo "Host checks: $PASS passed, $FAIL failed; GPU gates $( [[ $gate_rc -eq 0 ]] && echo passed || echo FAILED )."
     return 1
   fi
-}
-
-cmd_container() {
-  local sub="${1:-}"
-  shift || true
-  case "$sub" in
-    install) cmd_container_install ;;
-    build)   cmd_container_build "$@" ;;
-    run)     cmd_container_run "$@" ;;
-    service) cmd_container_service "$@" ;;
-    stop)    cmd_container_stop ;;
-    shell)   cmd_container_shell ;;
-    update)  cmd_container_update "$@" ;;
-    status)  cmd_container_status ;;
-    doctor)  cmd_container_doctor ;;
-    reset)   cmd_container_reset "$@" ;;
-    *) die "Unknown container subcommand: ${sub:-<none>} (try: container install | build | run | service | stop | update | status | doctor | reset | shell)" ;;
-  esac
 }
 
 # ------------------------------- Dispatch -----------------------------------
@@ -1764,7 +1739,6 @@ case "$CMD" in
   reset)    cmd_container_reset "$@" ;;
   shell)    cmd_container_shell ;;
   # --- hidden backward-compat aliases (old command spellings still work) ---
-  container) cmd_container "$@" ;;
   verify)   cmd_container_doctor ;;
   monitor)  cmd_status --watch ;;
   rollback) cmd_container_update --rollback ;;
