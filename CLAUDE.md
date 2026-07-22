@@ -26,7 +26,7 @@ cannot touch the host).
 Author/owner: GitHub `bjarkebolding`. Development home:
 `~/projects/spark-comfyui` on host `sparky` (sole remote: `origin`
 GitHub). Published: https://github.com/bjarkebolding/spark-comfyui.
-Current version: **2026.07.22.1**. Only the newest tag and GitHub
+Current version: **2026.07.22.2**. Only the newest tag and GitHub
 Release are kept; older tags and release pages were removed on
 2026-07-20 (the git history is the archive). MIT licensed,
 shellcheck-clean.

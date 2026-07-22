@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.07.22.1 | License: MIT
+#  Version 2026.07.22.2 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -85,7 +85,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.07.22.1"
+VERSION="2026.07.22.2"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -844,6 +844,22 @@ cmd_status() {
   [[ -f "$cfg" ]] && grep -q 'network_mode *= *personal_cloud' "$cfg" \
     && echo "  Manager: network_mode = personal_cloud" \
     || echo "  Manager: personal_cloud NOT set"
+
+  # Where the container will find content. Always shown: it is the answer to
+  # "which paths am I actually using", and with MOUNTS_CONF pointing at a
+  # profile it is the only way to confirm which profile is in effect.
+  # resolve_mounts already ran above, so the arrays are populated.
+  hdr "Mounts"
+  for ci in "${!RESOLVED_ENTRIES[@]}"; do
+    printf '%s\t%s\n' "${RESOLVED_ENTRIES[$ci]}" "${RESOLVED_PATHS[$ci]}"
+  done | expand -t 26 | sed 's/^/  /'
+  local cm
+  for cm in "${EXTRA_MOUNTS[@]}"; do
+    echo "  extra: $cm"
+  done
+  [[ -f "$MOUNTS_CONF" ]] \
+    && echo "  (config: $MOUNTS_CONF)" \
+    || echo "  (no config file — everything under $DATA_DIR)"
 }
 
 # =============================================================================
@@ -1212,7 +1228,7 @@ seed_mounts_conf() {
 # spark-mounts.conf — where the container finds your content.
 # Uncommented lines are KEY = PATH. Relative paths resolve against this
 # file's directory. Without overrides everything lives under data/ next to
-# the script. 'container status' always shows the resolved table.
+# the script. 'status' always shows the resolved table.
 #
 # Per-entry overrides (keys match the content set exactly):
 # models = /mnt/fast-ssd/models
@@ -1499,65 +1515,6 @@ the update: $0 stop && $0 run"
   fi
 }
 
-cmd_container_status() {
-  need_docker
-  echo
-  echo "== image =="
-  if docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1; then
-    docker images "$CONTAINER_IMAGE" \
-      --format '{{.Tag}}\t{{.ID}}\t{{.Size}}\t(created {{.CreatedSince}})' \
-      | expand -t 14,28,38 | sed 's/^/  /'
-  else
-    echo "  none — run: $0 install"
-  fi
-  echo
-  echo "== container =="
-  local cid
-  cid="$(docker ps -q -f "name=^${CONTAINER_NAME}$")"
-  if [[ -n "$cid" ]]; then
-    docker ps -f "id=$cid" --format '{{.Names}}: {{.Status}}, port {{.Ports}}' \
-      | sed 's/^/  /'
-    # Quiet when healthy: only flag when the running image is not :latest
-    # (i.e. an update happened under a running server).
-    local running_img latest_img
-    running_img="$(docker inspect -f '{{.Image}}' "$cid")"
-    latest_img="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
-    if [[ -n "$latest_img" && "$running_img" != "$latest_img" ]]; then
-      warn "running an image that is no longer :latest — restart to pick up
-the update: $0 stop && $0 run"
-    fi
-    echo
-    echo "== mounts =="
-    docker inspect "$cid" \
-      --format '{{range .Mounts}}{{.Type}}{{"\t"}}{{.Source}}{{"\t"}}-> {{.Destination}}{{"\n"}}{{end}}' \
-      | sed '/^$/d' | expand -t 8,64 | sed 's/^/  /'
-  else
-    echo "  not running — start: $0 run"
-  fi
-  echo
-  echo "== configured mounts (resolved) =="
-  resolve_mounts
-  local ci
-  for ci in "${!RESOLVED_ENTRIES[@]}"; do
-    printf '%s\t%s\n' "${RESOLVED_ENTRIES[$ci]}" "${RESOLVED_PATHS[$ci]}"
-  done | expand -t 26 | sed 's/^/  /'
-  local cm
-  for cm in "${EXTRA_MOUNTS[@]}"; do
-    echo "  extra: $cm"
-  done
-  [[ -f "$MOUNTS_CONF" ]] \
-    && echo "  (overrides: $MOUNTS_CONF)" \
-    || echo "  (no spark-mounts.conf — defaults; seeded on next build)"
-  echo
-  echo "== cache volume =="
-  if docker volume inspect "$CONTAINER_IMAGE-cache" >/dev/null 2>&1; then
-    echo "  $CONTAINER_IMAGE-cache (pip + compiled CUDA kernels; safe to"
-    echo "  delete at the cost of a slower next start)"
-  else
-    echo "  none yet (created on first 'run')"
-  fi
-}
-
 cmd_container_doctor() {
   need_docker
   # ok/bad increment these shared counters.
@@ -1619,6 +1576,10 @@ cmd_container_doctor() {
     docker image inspect "$CONTAINER_IMAGE:previous" >/dev/null 2>&1 \
       && info "rollback point present ($CONTAINER_IMAGE:previous)" \
       || info "no rollback point yet (:previous appears after the first changing update)"
+    docker volume inspect "$CONTAINER_IMAGE-cache" >/dev/null 2>&1 \
+      && info "cache volume $CONTAINER_IMAGE-cache present (pip + compiled CUDA
+  kernels; safe to delete at the cost of a slower next start)" \
+      || info "no cache volume yet (created on first run)"
   else
     bad "image $CONTAINER_IMAGE:latest missing — run: $0 install"
   fi

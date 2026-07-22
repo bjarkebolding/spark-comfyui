@@ -89,6 +89,14 @@ mount = /mnt/nas/sdxl-models:/opt/ComfyUI/models/nas:ro
 
 `status` always prints the resolved table. A typo in a `mount =` line dies loudly instead of silently shadowing your data with an empty directory. Point `extra_model_paths.yaml` entries at the container side of `mount =` lines.
 
+Relative paths resolve against the config file's own directory. For several setups, keep one file each and select with `MOUNTS_CONF`:
+
+```bash
+MOUNTS_CONF=./nas-profile.conf ./spark-comfyui.sh run
+```
+
+Use the same variable on `backup` and `restore` so they act on that profile. To run two profiles at once, add `CONTAINER_NAME` and `PORT` overrides.
+
 ## Patch list (optional)
 
 `comfyui-patches.list` next to the script merges upstream PRs or fork branches (`pr:12345`, `branch:name`, `remote:<url> <branch>`) on top of ComfyUI inside the image build. A conflict fails the build loudly. Empty list means plain master tracking.
