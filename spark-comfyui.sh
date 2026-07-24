@@ -1019,9 +1019,9 @@ cmd_restore() {
   check_legacy_layout
   if ! docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1; then
     log "No container image — building first"
-    cmd_container_build
+    cmd_build
   fi
-  cmd_container_stop
+  stop_container
 
   # Archive members carry entry names; each restores into its RESOLVED
   # host path, so per-entry mount overrides are honored.
@@ -1297,7 +1297,7 @@ the NVIDIA Container Toolkit, then re-run."
 passthrough may fail (install/configure the NVIDIA Container Toolkit)"
 }
 
-cmd_container_build() {
+cmd_build() {
   need_docker
   seed_mounts_conf
   log "Resolving upstream ComfyUI master"
@@ -1314,7 +1314,7 @@ unreachable) — check the network and re-run"
   # --provenance=false: buildx otherwise attaches a provenance attestation
   # stamped with the build time, giving every build a fresh manifest digest
   # even when all layers are cached and the content is identical — which
-  # breaks cmd_container_update's changed-vs-current comparison
+  # breaks cmd_update's changed-vs-current comparison
   # (field-diagnosed 2026-07-20: two builds, same config timestamp,
   # different "image IDs").
   docker build \
@@ -1333,8 +1333,8 @@ unreachable) — check the network and re-run"
   echo "  Launch it: $0 run"
 }
 
-# Shared docker-run argument assembly for cmd_container_run (foreground,
-# --rm) and cmd_container_service (detached, restart policy). Fills the
+# Shared docker-run argument assembly for cmd_run (foreground,
+# --rm) and cmd_service (detached, restart policy). Fills the
 # CRUN_ARGS array: hardening flags (no capabilities, no privilege
 # escalation, only the GPU), the cache volume, and the resolved content
 # mounts. Dirs are created if missing; the yaml entry is a file and only
@@ -1372,7 +1372,7 @@ _container_run_args() {
   done
 }
 
-cmd_container_run() {
+cmd_run() {
   need_docker
   if [[ -n "$(docker ps -q -f "name=^${CONTAINER_NAME}$")" ]]; then
     die "container $CONTAINER_NAME is already running — stop it first: $0 stop
@@ -1394,7 +1394,7 @@ cmd_container_run() {
 # The container-world 'service': a detached container with a docker restart
 # policy instead of a systemd unit. The docker daemon restarts it after
 # crashes and reboots; no user lingering, no unit files.
-cmd_container_service() {
+cmd_service() {
   need_docker
   if [[ "${1:-}" == "--disable" ]]; then
     if [[ -n "$(docker ps -aq -f "name=^${CONTAINER_NAME}$")" ]]; then
@@ -1426,14 +1426,14 @@ cmd_container_service() {
 
 # Container-world install: no venv, no apt, no sudo. Preflight, seed the
 # config templates, create data/, build the image. Idempotent.
-cmd_container_install() {
+cmd_install() {
   need_docker
   check_legacy_layout
   install_self
   seed_mounts_conf
   seed_patch_list
   mkdir -p "$DATA_DIR"
-  cmd_container_build
+  cmd_build
   local ip_hint
   ip_hint="$(hostname -I 2>/dev/null | awk '{print $1}')"
   log "Done!"
@@ -1452,7 +1452,7 @@ EOF
 # Container-world reset: content is outside by design, so reset only
 # removes what is reproducible (containers, every image tag, the cache
 # volume) and rebuilds from scratch. data/ is never touched.
-cmd_container_reset() {
+cmd_reset() {
   need_docker
   local yes=0
   [[ "${1:-}" == "--yes" ]] && yes=1
@@ -1466,7 +1466,7 @@ cmd_container_reset() {
     read -r -p "  Proceed? [y/N] " answer
     [[ "$answer" == y || "$answer" == Y ]] || die "aborted — nothing removed"
   fi
-  cmd_container_stop
+  stop_container
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   local ids
   ids="$(docker images "$CONTAINER_IMAGE" -q | sort -u)"
@@ -1477,10 +1477,10 @@ cmd_container_reset() {
   fi
   docker volume rm "$CONTAINER_IMAGE-cache" >/dev/null 2>&1 \
     && log "Removed cache volume" || true
-  cmd_container_build --no-cache
+  cmd_build --no-cache
 }
 
-cmd_container_stop() {
+stop_container() {
   need_docker
   if [[ -n "$(docker ps -q -f "name=^${CONTAINER_NAME}$")" ]]; then
     log "Stopping container $CONTAINER_NAME"
@@ -1491,13 +1491,13 @@ cmd_container_stop() {
   fi
 }
 
-cmd_container_shell() {
+cmd_shell() {
   need_docker
   docker exec -it "$CONTAINER_NAME" bash \
     || die "could not exec into $CONTAINER_NAME — is it running? ($0 run)"
 }
 
-cmd_container_update() {
+cmd_update() {
   local rollback=0 torch=0 arg
   for arg in "$@"; do
     case "$arg" in
@@ -1546,7 +1546,7 @@ cmd_container_update() {
   local before after
   before="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
   [[ -n "$before" ]] && docker tag "$before" "$CONTAINER_IMAGE:pre-update"
-  cmd_container_build "${build_args[@]}"
+  cmd_build "${build_args[@]}"
   after="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:latest")"
   if [[ "$before" == "$after" ]]; then
     [[ -n "$before" ]] && docker rmi "$CONTAINER_IMAGE:pre-update" >/dev/null
@@ -1567,7 +1567,7 @@ the update: $0 stop && $0 run"
   fi
 }
 
-cmd_container_doctor() {
+cmd_doctor() {
   need_docker
   # ok/bad increment these shared counters.
   PASS=0; FAIL=0
@@ -1768,22 +1768,22 @@ case "$CMD" in
   *) banner ;;
 esac
 case "$CMD" in
-  install)  cmd_container_install ;;
-  run)      cmd_container_run "$@" ;;
-  service)  cmd_container_service "$@" ;;
+  install)  cmd_install ;;
+  run)      cmd_run "$@" ;;
+  service)  cmd_service "$@" ;;
   stop)     cmd_stop ;;
-  update)   cmd_container_update "$@" ;;
-  doctor)   cmd_container_doctor ;;
+  update)   cmd_update "$@" ;;
+  doctor)   cmd_doctor ;;
   status)   cmd_status "$@" ;;
   tune)     cmd_tune "$@" ;;
   backup)   cmd_backup "$@" ;;
   restore)  cmd_restore "$@" ;;
-  reset)    cmd_container_reset "$@" ;;
-  shell)    cmd_container_shell ;;
+  reset)    cmd_reset "$@" ;;
+  shell)    cmd_shell ;;
   # --- hidden backward-compat aliases (old command spellings still work) ---
-  verify)   cmd_container_doctor ;;
+  verify)   cmd_doctor ;;
   monitor)  cmd_status --watch ;;
-  rollback) cmd_container_update --rollback ;;
+  rollback) cmd_update --rollback ;;
   ""|-h|--help|help) usage ;;
   -v|--version|version) echo "spark-comfyui $VERSION" ;;
   *) die "Unknown command: $CMD (try: install | run | service | stop | update | doctor | status | tune | backup | restore | reset)" ;;

@@ -89,7 +89,7 @@ ARG ORT_WHEEL_URL
 ARG SAGE_REF
 ARG TORCH_INDEX
 
-# ComfyUI at the exact commit cmd_container_build resolved (the ARG value is
+# ComfyUI at the exact commit cmd_build resolved (the ARG value is
 # the cache key: a new upstream commit rebuilds from this layer down, the
 # torch and SageAttention stages above stay cached).
 RUN git clone ${REPO_URL} /opt/ComfyUI \
