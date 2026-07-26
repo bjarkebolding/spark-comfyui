@@ -1,8 +1,24 @@
-# spark-comfyui
+<div align="center">
 
-**One script to install, run, update, and maintain [ComfyUI](https://github.com/Comfy-Org/ComfyUI) on the NVIDIA DGX Spark (GB10 Grace Blackwell) — fully containerized.**
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/banner-dark.svg">
+  <img alt="spark-comfyui — ComfyUI on the NVIDIA DGX Spark (GB10 Grace Blackwell)" src="docs/banner-light.svg" width="760">
+</picture>
+
+**One script to install, run, update, and maintain [ComfyUI](https://github.com/Comfy-Org/ComfyUI) on the NVIDIA DGX Spark (GB10 Grace Blackwell), fully containerized.**
+
+[![CI](https://github.com/bjarkebolding/spark-comfyui/actions/workflows/ci.yml/badge.svg)](https://github.com/bjarkebolding/spark-comfyui/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/bjarkebolding/spark-comfyui?label=release&color=76B900)](https://github.com/bjarkebolding/spark-comfyui/releases)
+[![License](https://img.shields.io/github/license/bjarkebolding/spark-comfyui?color=76B900)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-DGX_Spark_%C2%B7_GB10_%C2%B7_sm__121-76B900)
+
+</div>
 
 The whole GB10-tuned stack (cu130 PyTorch, native sm_121 SageAttention, GPU onnxruntime, the Spark mods) lives in a docker image. Your content (models, workflows, custom nodes, outputs) lives in a plain `data/` directory next to the script and is bind-mounted in. Custom-node code, which is arbitrary third-party Python, runs confined: non-root, no capabilities, nothing visible but your content and the GPU.
+
+## Contents
+
+[Quick start](#quick-start) · [Commands](#commands) · [What it looks like](#what-it-looks-like) · [Mounts](#mounts) · [Patch list](#patch-list-optional) · [Troubleshooting](#troubleshooting) · [Security notes](#security-notes)
 
 ## Quick start
 
@@ -34,6 +50,8 @@ Models go in `data/models/checkpoints` (etc.). No venv, no system Python changes
 | `restore FILE` | Rebuilds from a backup: image if missing, content into `data/`, custom nodes re-cloned at pinned commits, missing models listed with sizes. |
 | `reset [--yes]` | Removes the container, all image tags and the cache volume; rebuilds from scratch. `data/` is never touched. |
 
+Runtime knobs, set at `run` time: `SPARK_RESERVE_VRAM=8` keeps 8 GB of the unified pool free (hardens against the overcommit freeze when pushing large models), `SPARK_BF16=0` disables the bf16 fast path, `SPARK_STATIC_VRAM=1` disables DynamicVRAM.
+
 ## What it looks like
 
 `status --watch` during a run. Heat-colored timeseries; rows appear only when they carry information:
@@ -59,23 +77,14 @@ $ ./spark-comfyui.sh status --watch 3
   session: 4 gens · first 29.8s · steady ~13.6s (13.6–13.6) · ~0.63 it/s
 ```
 
-The `session:` line is made for A/B tests: run one watch per condition and compare. That is how the container itself was validated: native steady 13.59s vs container 13.61s on the same workflow and seeds, every seed-matched output pair bit-identical.
+> [!TIP]
+> The `session:` line is made for A/B tests: run one watch per condition and compare. That is how the container itself was validated: native steady 13.59s vs container 13.61s on the same workflow and seeds, every seed-matched output pair bit-identical.
 
-A healthy `doctor` ends like this — the gates run inside a throwaway container from the exact image `run` uses:
+A healthy `doctor` looks like this. The gates run inside a throwaway container from the exact image `run` uses:
 
-```console
-== SageAttention (live kernel) ==
-  [PASS] sm_121 kernel runs
-
-== onnxruntime GPU ==
-  [PASS] CUDAExecutionProvider available
-
-== NVFP4 (comfy-kitchen forced cuda backend) ==
-  [PASS] forced NVFP4 quantize+matmul passed
-
-All container gates passed.
-Host checks: 4 passed. Everything healthy.
-```
+<div align="center">
+  <img alt="spark-comfyui.sh doctor: all GPU gates pass" src="docs/doctor.svg" width="720">
+</div>
 
 ## Mounts
 
@@ -106,19 +115,23 @@ The flag works with every command and must name a file that exists, so a typo fa
 
 ## Troubleshooting
 
-Start with `./spark-comfyui.sh doctor` — every failure names its fix. Common ones:
+Start with `./spark-comfyui.sh doctor`; every failure names its fix. Common ones:
 
 - **An update broke generation**: `update --rollback`, restart.
 - **A custom node will not load**: check the start log; the entrypoint installs each node's requirements and warns per node. A node needing a system library the image lacks is worth an issue.
 - **Silent hard-reboot during video generation**: `status --watch`, reproduce, read the last logged lines. A power spike right before death is overcurrent; fix with `tune --clock-cap 2100`.
 - **Machine freezes near memory limit**: swap thrash on unified memory; run `tune`.
-- **`sm_121 exceeds torch's supported maximum` at startup**: expected on GB10, harmless.
+
+> [!NOTE]
+> The `sm_121 exceeds torch's supported maximum` line at startup is expected on GB10 and harmless. PyTorch JITs the kernels through PTX.
 
 ## Security notes
 
 - Custom nodes run as a non-root user with all capabilities dropped and only your content directories and the GPU visible. A malicious node cannot read your SSH keys or anything else on the host.
 - The image is reproducible from this repo: pinned ComfyUI commit, sha256-pinned onnxruntime wheel, pinned SageAttention. `update --rollback` returns to the previous image atomically.
-- Manager's `personal_cloud` mode is fine on a trusted LAN; do not expose the port to the internet.
+
+> [!WARNING]
+> Manager's `personal_cloud` mode is fine on a trusted LAN. Do not expose the port to the internet.
 
 ---
 

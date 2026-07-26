@@ -1,0 +1,132 @@
+<svg class="rich-terminal" viewBox="0 0 1019 513.5999999999999" xmlns="http://www.w3.org/2000/svg">
+    <!-- Generated with Rich https://www.textualize.io -->
+    <style>
+
+    @font-face {
+        font-family: "Fira Code";
+        src: local("FiraCode-Regular"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff2/FiraCode-Regular.woff2") format("woff2"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff/FiraCode-Regular.woff") format("woff");
+        font-style: normal;
+        font-weight: 400;
+    }
+    @font-face {
+        font-family: "Fira Code";
+        src: local("FiraCode-Bold"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff2/FiraCode-Bold.woff2") format("woff2"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff/FiraCode-Bold.woff") format("woff");
+        font-style: bold;
+        font-weight: 700;
+    }
+
+    .terminal-774369193-matrix {
+        font-family: Fira Code, monospace;
+        font-size: 20px;
+        line-height: 24.4px;
+        font-variant-east-asian: full-width;
+    }
+
+    .terminal-774369193-title {
+        font-size: 18px;
+        font-weight: bold;
+        font-family: arial;
+    }
+
+    .terminal-774369193-r1 { fill: #76b900;font-weight: bold }
+.terminal-774369193-r2 { fill: #c9d1d9 }
+.terminal-774369193-r3 { fill: #c9d1d9;font-weight: bold }
+    </style>
+
+    <defs>
+    <clipPath id="terminal-774369193-clip-terminal">
+      <rect x="0" y="0" width="999.4" height="462.59999999999997" />
+    </clipPath>
+    <clipPath id="terminal-774369193-line-0">
+    <rect x="0" y="1.5" width="1000.4" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-774369193-line-1">
+    <rect x="0" y="25.9" width="1000.4" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-774369193-line-2">
+    <rect x="0" y="50.3" width="1000.4" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-774369193-line-3">
+    <rect x="0" y="74.7" width="1000.4" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-774369193-line-4">
+    <rect x="0" y="99.1" width="1000.4" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-774369193-line-5">
+    <rect x="0" y="123.5" width="1000.4" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-774369193-line-6">
+    <rect x="0" y="147.9" width="1000.4" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-774369193-line-7">
+    <rect x="0" y="172.3" width="1000.4" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-774369193-line-8">
+    <rect x="0" y="196.7" width="1000.4" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-774369193-line-9">
+    <rect x="0" y="221.1" width="1000.4" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-774369193-line-10">
+    <rect x="0" y="245.5" width="1000.4" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-774369193-line-11">
+    <rect x="0" y="269.9" width="1000.4" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-774369193-line-12">
+    <rect x="0" y="294.3" width="1000.4" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-774369193-line-13">
+    <rect x="0" y="318.7" width="1000.4" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-774369193-line-14">
+    <rect x="0" y="343.1" width="1000.4" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-774369193-line-15">
+    <rect x="0" y="367.5" width="1000.4" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-774369193-line-16">
+    <rect x="0" y="391.9" width="1000.4" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-774369193-line-17">
+    <rect x="0" y="416.3" width="1000.4" height="24.65"/>
+            </clipPath>
+    </defs>
+
+    <rect fill="#0d1117" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1017" height="511.6" rx="8"/><text class="terminal-774369193-title" fill="#c9d1d9" text-anchor="middle" x="508" y="27">spark-comfyui.sh&#160;doctor</text>
+            <g transform="translate(26,22)">
+            <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
+            <circle cx="22" cy="0" r="7" fill="#febc2e"/>
+            <circle cx="44" cy="0" r="7" fill="#28c840"/>
+            </g>
+        
+    <g transform="translate(9, 41)" clip-path="url(#terminal-774369193-clip-terminal)">
+    
+    <g class="terminal-774369193-matrix">
+    <text class="terminal-774369193-r1" x="0" y="20" textLength="658.8" clip-path="url(#terminal-774369193-line-0)" fill="#76b900" font-weight="bold">==&gt;&#160;Running&#160;the&#160;GPU&#160;gates&#160;inside&#160;a&#160;throwaway&#160;container</text><text class="terminal-774369193-r2" x="1000.4" y="20" textLength="12.2" clip-path="url(#terminal-774369193-line-0)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r2" x="1000.4" y="44.4" textLength="12.2" clip-path="url(#terminal-774369193-line-1)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r3" x="0" y="68.8" textLength="219.6" clip-path="url(#terminal-774369193-line-2)" fill="#c9d1d9" font-weight="bold">==&#160;torch&#160;/&#160;CUDA&#160;==</text><text class="terminal-774369193-r2" x="1000.4" y="68.8" textLength="12.2" clip-path="url(#terminal-774369193-line-2)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r2" x="0" y="93.2" textLength="500.2" clip-path="url(#terminal-774369193-line-3)" fill="#c9d1d9">&#160;&#160;torch&#160;2.13.0+cu130&#160;|&#160;compiled&#160;CUDA&#160;13.0</text><text class="terminal-774369193-r2" x="1000.4" y="93.2" textLength="12.2" clip-path="url(#terminal-774369193-line-3)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r2" x="0" y="117.6" textLength="366" clip-path="url(#terminal-774369193-line-4)" fill="#c9d1d9">&#160;&#160;device:&#160;NVIDIA&#160;GB10&#160;|&#160;sm_121</text><text class="terminal-774369193-r2" x="1000.4" y="117.6" textLength="12.2" clip-path="url(#terminal-774369193-line-4)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r1" x="24.4" y="142" textLength="73.2" clip-path="url(#terminal-774369193-line-5)" fill="#76b900" font-weight="bold">[PASS]</text><text class="terminal-774369193-r2" x="97.6" y="142" textLength="573.4" clip-path="url(#terminal-774369193-line-5)" fill="#c9d1d9">&#160;torch&#160;is&#160;the&#160;cu130&#160;CUDA&#160;build&#160;and&#160;sees&#160;the&#160;GPU</text><text class="terminal-774369193-r2" x="1000.4" y="142" textLength="12.2" clip-path="url(#terminal-774369193-line-5)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r2" x="1000.4" y="166.4" textLength="12.2" clip-path="url(#terminal-774369193-line-6)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r3" x="0" y="190.8" textLength="402.6" clip-path="url(#terminal-774369193-line-7)" fill="#c9d1d9" font-weight="bold">==&#160;SageAttention&#160;(live&#160;kernel)&#160;==</text><text class="terminal-774369193-r2" x="1000.4" y="190.8" textLength="12.2" clip-path="url(#terminal-774369193-line-7)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r1" x="24.4" y="215.2" textLength="73.2" clip-path="url(#terminal-774369193-line-8)" fill="#76b900" font-weight="bold">[PASS]</text><text class="terminal-774369193-r2" x="97.6" y="215.2" textLength="231.8" clip-path="url(#terminal-774369193-line-8)" fill="#c9d1d9">&#160;sm_121&#160;kernel&#160;runs</text><text class="terminal-774369193-r2" x="1000.4" y="215.2" textLength="12.2" clip-path="url(#terminal-774369193-line-8)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r2" x="1000.4" y="239.6" textLength="12.2" clip-path="url(#terminal-774369193-line-9)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r3" x="0" y="264" textLength="256.2" clip-path="url(#terminal-774369193-line-10)" fill="#c9d1d9" font-weight="bold">==&#160;onnxruntime&#160;GPU&#160;==</text><text class="terminal-774369193-r2" x="1000.4" y="264" textLength="12.2" clip-path="url(#terminal-774369193-line-10)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r1" x="24.4" y="288.4" textLength="73.2" clip-path="url(#terminal-774369193-line-11)" fill="#76b900" font-weight="bold">[PASS]</text><text class="terminal-774369193-r2" x="97.6" y="288.4" textLength="390.4" clip-path="url(#terminal-774369193-line-11)" fill="#c9d1d9">&#160;CUDAExecutionProvider&#160;available</text><text class="terminal-774369193-r2" x="1000.4" y="288.4" textLength="12.2" clip-path="url(#terminal-774369193-line-11)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r2" x="1000.4" y="312.8" textLength="12.2" clip-path="url(#terminal-774369193-line-12)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r3" x="0" y="337.2" textLength="573.4" clip-path="url(#terminal-774369193-line-13)" fill="#c9d1d9" font-weight="bold">==&#160;NVFP4&#160;(comfy-kitchen&#160;forced&#160;cuda&#160;backend)&#160;==</text><text class="terminal-774369193-r2" x="1000.4" y="337.2" textLength="12.2" clip-path="url(#terminal-774369193-line-13)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r1" x="24.4" y="361.6" textLength="73.2" clip-path="url(#terminal-774369193-line-14)" fill="#76b900" font-weight="bold">[PASS]</text><text class="terminal-774369193-r2" x="97.6" y="361.6" textLength="439.2" clip-path="url(#terminal-774369193-line-14)" fill="#c9d1d9">&#160;forced&#160;NVFP4&#160;quantize+matmul&#160;passed</text><text class="terminal-774369193-r2" x="1000.4" y="361.6" textLength="12.2" clip-path="url(#terminal-774369193-line-14)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r2" x="1000.4" y="386" textLength="12.2" clip-path="url(#terminal-774369193-line-15)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r2" x="0" y="410.4" textLength="329.4" clip-path="url(#terminal-774369193-line-16)" fill="#c9d1d9">All&#160;container&#160;gates&#160;passed.</text><text class="terminal-774369193-r2" x="1000.4" y="410.4" textLength="12.2" clip-path="url(#terminal-774369193-line-16)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r2" x="1000.4" y="434.8" textLength="12.2" clip-path="url(#terminal-774369193-line-17)" fill="#c9d1d9">
+</text><text class="terminal-774369193-r2" x="0" y="459.2" textLength="512.4" clip-path="url(#terminal-774369193-line-18)" fill="#c9d1d9">Host&#160;checks:&#160;4&#160;passed.&#160;Everything&#160;healthy.</text><text class="terminal-774369193-r2" x="1000.4" y="459.2" textLength="12.2" clip-path="url(#terminal-774369193-line-18)" fill="#c9d1d9">
+</text>
+    </g>
+    </g>
+</svg>
