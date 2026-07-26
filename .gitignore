@@ -1,18 +1,8 @@
-# Everything spark-comfyui.sh installs lives next to the script — none of it
-# belongs in the repo.
-ComfyUI/
-comfyui-env/
-SageAttention/
-
 # Runtime artifacts
 thermal_monitor.log*
 
 # Archives written by 'spark-comfyui.sh backup'
 backups/
-
-# Hold area of an in-flight or interrupted 'spark-comfyui.sh reset' — may
-# hold the user's models; must never look like junk to git clean
-.spark-reset-hold/
 
 # Personal patch list (may reference private forks; the script seeds a
 # commented template automatically on first install)
@@ -31,4 +21,3 @@ spark-mounts.conf
 
 # Claude Code's own per-machine local settings (tool-permission allowlist)
 .claude/
-tests/
