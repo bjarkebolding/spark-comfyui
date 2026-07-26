@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.07.24 | License: MIT
+#  Version 2026.07.26 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -93,7 +93,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.07.24"
+VERSION="2026.07.26"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -1353,6 +1353,7 @@ _container_run_args() {
     -v "$CONTAINER_IMAGE-cache:/home/comfy/.cache"
     -e SPARK_BF16
     -e SPARK_STATIC_VRAM
+    -e SPARK_RESERVE_VRAM
   )
   local entry host i
   for i in "${!RESOLVED_ENTRIES[@]}"; do
@@ -1648,6 +1649,26 @@ cmd_doctor() {
     fi
   else
     info "container not running"
+  fi
+  # Real per-call SageAttention fallbacks. The launch-time gate proves the
+  # kernel runs on a synthetic shape, but ComfyUI silently swaps in PyTorch
+  # attention per call when a specific runtime shape fails — visible only in
+  # the live server's logs. total > benign (benign = 'Unsupported head_dim', a
+  # model-architecture limit) means a real regression (e.g. Triton's JIT shim
+  # broken), up to ~18x slower sampling. Warn, not fail: the install isn't
+  # broken, this session's sampling is just degraded.
+  if [[ -n "$cid" ]]; then
+    local _sflog sfc total benign
+    _sflog="$(mktemp)"
+    docker logs "$cid" >"$_sflog" 2>&1 || true
+    sfc="$(sage_fallback_counts "$_sflog")"
+    total="${sfc%% *}"; benign="${sfc##* }"
+    rm -f "$_sflog"
+    if (( total > benign )); then
+      warn "SageAttention fell back to PyTorch on $((total - benign)) real call(s) this session — degraded sampling (docker logs $CONTAINER_NAME)"
+    else
+      ok "SageAttention: no degraded fallbacks in the running container's logs"
+    fi
   fi
   if [[ -n "$(swapon --noheadings 2>/dev/null)" ]]; then
     warn "swap is ENABLED on the host — heavy workloads can freeze the box ($0 tune)"

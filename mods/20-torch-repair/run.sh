@@ -10,9 +10,9 @@
 #  a repair reinstalls the full cu130 wheel set (>1 GB), so the user should
 #  see progress, not a silent multi-minute pause.
 # =============================================================================
-# shellcheck disable=SC2034  # read by _run_mod's 'flags' verb in the main script
+# shellcheck disable=SC2034  # mod-contract flag; retained as docs (CLAUDE.md), no runner reads it now
 MOD_CRITICAL=1
-# shellcheck disable=SC2034  # read by _run_mod's 'flags' verb in the main script
+# shellcheck disable=SC2034  # mod-contract flag; retained as docs (CLAUDE.md), no runner reads it now
 MOD_STREAM=1
 
 mod_describe() {

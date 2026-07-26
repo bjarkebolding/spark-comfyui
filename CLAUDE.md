@@ -26,7 +26,7 @@ cannot touch the host).
 Author/owner: GitHub `bjarkebolding`. Development home:
 `~/projects/spark-comfyui` on host `sparky` (sole remote: `origin`
 GitHub). Published: https://github.com/bjarkebolding/spark-comfyui.
-Current version: **2026.07.24**. Only the newest tag and GitHub
+Current version: **2026.07.26**. Only the newest tag and GitHub
 Release are kept; older tags and release pages were removed on
 2026-07-20 (the git history is the archive). MIT licensed,
 shellcheck-clean.
@@ -346,10 +346,13 @@ restore is content-only by construction.
   moot because `tune` disables swap. `--disable-pinned-memory` stays:
   no cost, inoculates against the uncapped-pin path.
 - **get_free_memory cliff** (mod 10): `cudaMemGetInfo` under-reports
-  free memory when another CUDA process is resident, causing needless
+  free unified memory badly on GB10, about 69 GB low even on an idle box
+  (measured on comfy 806e092: 48 GB reported vs 117 GB actually
+  available), and worse with a co-resident CUDA process. Causes needless
   offload and drastically slower sampling. Fixed by reading
-  `psutil.virtual_memory().available`. Matters in practice with a
-  co-resident vLLM.
+  `psutil.virtual_memory().available`. This now also feeds the default-on
+  DynamicVRAM allocator (aimdo), which consumes `get_free_memory`, so the
+  patch keeps that allocator's staging decisions correct too.
 - **Overcurrent reboots**: some units hard-reboot (no logs) on the power
   spike at denoise start. `tune --clock-cap 2100` caps clocks
   (nvidia-smi -pl is N/A on GB10). `status --watch` captures the
@@ -391,6 +394,12 @@ restore is content-only by construction.
 - `SPARK_BF16` (default 1), `SPARK_STATIC_VRAM` (default 0; see the
   ComfyUI issue #13920 caveat in the roadmap): passed into the container
   by `run`/`service`
+- `SPARK_RESERVE_VRAM` (unset by default): GB of unified memory to keep
+  free, forwarded to ComfyUI's `--reserve-vram`. Unset means ComfyUI's own
+  default headroom. Set it at run time (`SPARK_RESERVE_VRAM=8 ... run`) to
+  harden against the overcommit freeze when pushing large models. The
+  entrypoint validates it as a number and drops a non-numeric value with a
+  warning. Passed through by `run`/`service` like the other `SPARK_*` vars.
 - `SPARK_SELF_UPDATE` (default 1). 0 stops `update` from git-pulling
   the spark-comfyui repo itself.
 

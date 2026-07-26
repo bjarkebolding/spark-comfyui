@@ -96,6 +96,15 @@ fi
 if [[ "${SPARK_STATIC_VRAM:-0}" == "1" ]]; then
   extra_flags+=(--disable-dynamic-vram)
 fi
+# Optional VRAM reserve (GB) kept free for the OS / a co-resident CUDA
+# process. Unset by default (ComfyUI's own default headroom applies); set
+# SPARK_RESERVE_VRAM at run time to harden against the overcommit freeze when
+# pushing large models. Numeric guard so a stray value can't inject flags.
+if [[ "${SPARK_RESERVE_VRAM:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  extra_flags+=(--reserve-vram "$SPARK_RESERVE_VRAM")
+elif [[ -n "${SPARK_RESERVE_VRAM:-}" ]]; then
+  warn "ignoring SPARK_RESERVE_VRAM='$SPARK_RESERVE_VRAM' (not a number of GB)"
+fi
 
 log "Launching ComfyUI"
 exec python main.py \

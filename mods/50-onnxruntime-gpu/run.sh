@@ -14,7 +14,7 @@
 #  buffered "first line is the status" protocol with its extra echoed lines,
 #  so status is reported via mod_export instead.
 # =============================================================================
-# shellcheck disable=SC2034  # read by _run_mod's 'flags' verb in the main script
+# shellcheck disable=SC2034  # mod-contract flag; retained as docs (CLAUDE.md), no runner reads it now
 MOD_STREAM=1
 
 mod_describe() {
