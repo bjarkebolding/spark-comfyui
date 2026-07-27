@@ -121,6 +121,7 @@ Start with `./spark-comfyui.sh doctor`; every failure names its fix. Common ones
 - **A custom node will not load**: check the start log; the entrypoint installs each node's requirements and warns per node. A node needing a system library the image lacks is worth an issue.
 - **Silent hard-reboot during video generation**: `status --watch`, reproduce, read the last logged lines. A power spike right before death is overcurrent; fix with `tune --clock-cap 2100`.
 - **Machine freezes near memory limit**: swap thrash on unified memory; run `tune`.
+- **Not sure SageAttention is really active?**: on this build it cannot silently fall back to plain attention, the failure mode most Spark guides warn about. The image compiles a native sm_121 kernel, and every start runs a live multi-shape kernel test that refuses to launch if it fails. `doctor` runs the same gate on demand.
 
 > [!NOTE]
 > The `sm_121 exceeds torch's supported maximum` line at startup is expected on GB10 and harmless. PyTorch JITs the kernels through PTX.
