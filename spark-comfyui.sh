@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.07.29 | License: MIT
+#  Version 2026.07.29.1 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -73,6 +73,11 @@
 #                              Works with any command, so several setups
 #                              can be tested side by side. Equivalent to
 #                              MOUNTS_CONF=PATH. The file must exist.
+#    --no-bf16-vae             Keep the bf16 fast path for the unet and text
+#                              encoder but run the VAE at default precision.
+#                              Required for LTX-2.3 audio workflows, whose
+#                              audio VAE fails under --bf16-vae. Equivalent
+#                              to SPARK_BF16_VAE=0.
 #
 #  Upgrading from a pre-container (native) install: 'install' detects the
 #  old layout and prints the move commands (five renames into data/).
@@ -93,7 +98,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.07.29"
+VERSION="2026.07.29.1"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -1797,7 +1802,7 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
 # not there is a typo, and silently falling back to defaults would mount the
 # wrong content — the same reasoning as the mount validation in
 # resolve_mounts.
-_argv=() _mounts_flag=""
+_argv=() _mounts_flag="" _bf16vae_flag=""
 while (( $# )); do
   case "$1" in
     --mounts)
@@ -1806,6 +1811,9 @@ while (( $# )); do
       _mounts_flag="$1"
       ;;
     --mounts=*) _mounts_flag="${1#*=}" ;;
+    # Flag form of SPARK_BF16_VAE=0, scanned out here for the same reason as
+    # --mounts: 'run' forwards everything it does not recognise to main.py.
+    --no-bf16-vae) _bf16vae_flag=0 ;;
     *)          _argv+=("$1") ;;
   esac
   shift
@@ -1816,7 +1824,10 @@ if [[ -n "$_mounts_flag" ]]; then
 (a named config must exist; refusing to fall back to defaults silently)"
   MOUNTS_CONF="$(readlink -f "$_mounts_flag")"
 fi
-unset _argv _mounts_flag
+# Exported, not just set: _container_run_args passes it with a bare
+# '-e SPARK_BF16_VAE', which takes the value from this process's environment.
+[[ -n "$_bf16vae_flag" ]] && export SPARK_BF16_VAE="$_bf16vae_flag"
+unset _argv _mounts_flag _bf16vae_flag
 
 CMD="${1:-}"
 shift || true

@@ -50,7 +50,14 @@ Models go in `data/models/checkpoints` (etc.). No venv, no system Python changes
 | `restore FILE` | Rebuilds from a backup: image if missing, content into `data/`, custom nodes re-cloned at pinned commits, missing models listed with sizes. |
 | `reset [--yes]` | Removes the container, all image tags and the cache volume; rebuilds from scratch. `data/` is never touched. |
 
-Runtime knobs, set at `run` time: `SPARK_RESERVE_VRAM=8` keeps 8 GB of the unified pool free (hardens against the overcommit freeze when pushing large models), `SPARK_BF16=0` disables the bf16 fast path, `SPARK_BF16_VAE=0` keeps that fast path but takes the VAE off bf16 (required for LTX-2.3 audio workflows), `SPARK_STATIC_VRAM=1` disables DynamicVRAM.
+Runtime knobs, set at `run` time: `SPARK_RESERVE_VRAM=8` keeps 8 GB of the unified pool free (hardens against the overcommit freeze when pushing large models), `SPARK_BF16=0` disables the bf16 fast path, `SPARK_BF16_VAE=0` keeps that fast path but takes the VAE off bf16, `SPARK_STATIC_VRAM=1` disables DynamicVRAM.
+
+The VAE one has a flag form, `--no-bf16-vae`, which works with any command:
+
+```bash
+./spark-comfyui.sh service --no-bf16-vae          # LTX-2.3 audio workflows
+./spark-comfyui.sh run --no-bf16-vae --fp32-vae   # or pick your own precision
+```
 
 ## What it looks like
 
@@ -121,6 +128,7 @@ Start with `./spark-comfyui.sh doctor`; every failure names its fix. Common ones
 - **A custom node will not load**: check the start log; the entrypoint installs each node's requirements and warns per node. A node needing a system library the image lacks is worth an issue.
 - **Silent hard-reboot during video generation**: `status --watch`, reproduce, read the last logged lines. A power spike right before death is overcurrent; fix with `tune --clock-cap 2100`.
 - **Machine freezes near memory limit**: swap thrash on unified memory; run `tune`.
+- **LTX-2.3 audio workflows fail with `Input type (float) and bias type (c10::BFloat16)`**: the audio VAE never casts the input waveform to the VAE dtype, so it cannot run under `--bf16-vae`. This affects every LTX-2.3 audio workflow, including the templates ComfyUI ships. Start with `--no-bf16-vae`; the unet and text-encoder speedups are kept. You cannot fix this by passing `--fp32-vae` instead, because ComfyUI's VAE precision flags are mutually exclusive and the entrypoint has already added `--bf16-vae`.
 - **Not sure SageAttention is really active?**: on this build it cannot silently fall back to plain attention, the failure mode most Spark guides warn about. The image compiles a native sm_121 kernel, and every start runs a live multi-shape kernel test that refuses to launch if it fails. `doctor` runs the same gate on demand.
 
 > [!NOTE]
