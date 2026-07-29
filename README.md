@@ -50,7 +50,7 @@ Models go in `data/models/checkpoints` (etc.). No venv, no system Python changes
 | `restore FILE` | Rebuilds from a backup: image if missing, content into `data/`, custom nodes re-cloned at pinned commits, missing models listed with sizes. |
 | `reset [--yes]` | Removes the container, all image tags and the cache volume; rebuilds from scratch. `data/` is never touched. |
 
-Runtime knobs, set at `run` time: `SPARK_RESERVE_VRAM=8` keeps 8 GB of the unified pool free (hardens against the overcommit freeze when pushing large models), `SPARK_BF16=0` disables the bf16 fast path, `SPARK_STATIC_VRAM=1` disables DynamicVRAM.
+Runtime knobs, set at `run` time: `SPARK_RESERVE_VRAM=8` keeps 8 GB of the unified pool free (hardens against the overcommit freeze when pushing large models), `SPARK_BF16=0` disables the bf16 fast path, `SPARK_BF16_VAE=0` keeps that fast path but takes the VAE off bf16 (required for LTX-2.3 audio workflows), `SPARK_STATIC_VRAM=1` disables DynamicVRAM.
 
 ## What it looks like
 

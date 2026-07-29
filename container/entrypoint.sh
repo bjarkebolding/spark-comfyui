@@ -90,8 +90,18 @@ python /opt/spark/mods/30-manager-config/configure.py apply \
 #    host's port mapping, so --listen 0.0.0.0 here is scoped to the
 #    container's own network namespace.
 extra_flags=()
+# bf16 is the GB10 fast path. The VAE half is split out because LTX-2.3's
+# audio VAE never casts the input waveform to the VAE dtype, so --bf16-vae
+# fails it with "Input type (float) and bias type (c10::BFloat16)". That hits
+# the stock LoadAudio node too, i.e. every LTX-2.3 audio workflow. SPARK_BF16_VAE=0
+# drops that one flag and keeps the unet and text-encoder speedups.
 if [[ "${SPARK_BF16:-1}" == "1" ]]; then
-  extra_flags+=(--bf16-unet --bf16-vae --bf16-text-enc)
+  extra_flags+=(--bf16-unet --bf16-text-enc)
+  if [[ "${SPARK_BF16_VAE:-1}" == "1" ]]; then
+    extra_flags+=(--bf16-vae)
+  else
+    info "bf16 VAE disabled (SPARK_BF16_VAE=0) — needed for LTX-2.3 audio workflows"
+  fi
 fi
 if [[ "${SPARK_STATIC_VRAM:-0}" == "1" ]]; then
   extra_flags+=(--disable-dynamic-vram)

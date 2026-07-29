@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.07.26 | License: MIT
+#  Version 2026.07.29 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -93,7 +93,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.07.26"
+VERSION="2026.07.29"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -375,6 +375,21 @@ _watch_row() {
     if (x + 0 >= warn + 0) return "\033[33m"
     return "\033[32m"
   }
+  # Rows with thresholds keep hue as the health signal, untouched. Rows
+  # without one have no honest "bad" value, so they ramp BRIGHTNESS with the
+  # sample position in the window instead: magnitude reads at a glance and
+  # hue still means only one thing.
+  function glyphcol(x, lvl) {
+    if (warn != "") return heat(x)
+    # Dead-band, same idea as the trend arrow: the ramp is normalised to the
+    # window min/max, which has no notion of whether that span means
+    # anything. Without this a 0.9% wobble strobes dim-to-bright exactly like
+    # a full-scale sweep, and at --watch 1 it flickers every second.
+    if (flatish) return "\033[36m"
+    if (lvl >= 6) return "\033[1;36m"
+    if (lvl >= 3) return "\033[36m"
+    return "\033[2;36m"
+  }
   BEGIN {
     split("▁ ▂ ▃ ▄ ▅ ▆ ▇ █", bar, " ")
     d = "\033[2m"; b = "\033[1m"; r = "\033[0m"
@@ -387,14 +402,22 @@ _watch_row() {
       sum += x; cnt++
       prev = last; last = x
     }
+    # span worth colouring? mean of 0 only happens when every sample is 0,
+    # which hi > lo already excludes below.
+    avg = (cnt > 0) ? sum / cnt : 0
+    ref = (avg < 0) ? -avg : avg
+    flatish = (hi > lo && ref > 0 && (hi - lo) / ref < 0.05)
     out = ""; pc = ""
     for (i = 1; i <= n; i++) {
       if (v[i] == "-") { out = out " "; continue }
       x = v[i] + 0
-      lvl = (hi > lo) ? int((x - lo) / (hi - lo) * 7 + 0.5) : 4
-      c = heat(x)
+      # A metric that never moved draws a flat rule rather than a mid-height
+      # bar, so "steady" and "mid-range" stop looking identical.
+      if (hi > lo) { lvl = int((x - lo) / (hi - lo) * 7 + 0.5); g = bar[lvl + 1] }
+      else { lvl = 4; g = "─" }
+      c = glyphcol(x, lvl)
       if (c != pc) { out = out c; pc = c }
-      out = out bar[lvl + 1]
+      out = out g
     }
     if (pc != "") out = out r
     # Trend arrow: last sample vs the one before, dead-banded to 5% of the
@@ -404,13 +427,14 @@ _watch_row() {
       if (last - prev > (hi - lo) * 0.05) arrow = "↗"
       else if (prev - last > (hi - lo) * 0.05) arrow = "↘"
     }
-    if (cur == "-") { curtxt = sprintf("%9s", "n/a"); curcol = d }
+    if (cur == "-") { curtxt = sprintf("%9s", "·"); curcol = d }
     else { curtxt = sprintf("%9s", cur unit); curcol = b heat(cur) }
     stats = ""
     if (cnt > 0) stats = sprintf("%.4g–%.4g ~%.4g", lo, hi, sum / cnt)
     if (extra != "") stats = stats " " extra
+    acol = (cur == "-") ? d : heat(cur)
     printf "  %-8s%s%s%s %s%s%s %s  %s%s%s", \
-      label, curcol, curtxt, r, d, arrow, r, out, d, stats, r
+      label, curcol, curtxt, r, acol, arrow, r, out, d, stats, r
   }'
 }
 
@@ -479,7 +503,16 @@ for hid, item in hist.items():
             except Exception:
                 total = 0
             pct = 100.0 * len(cached) / total if cached is not None and total else None
-            last = (start, max(ends), "execution_success" in ts, hid, pct)
+            # ComfyUI reports status_str "error" for a cancellation too, so
+            # read the terminal message instead: a run the user stopped is
+            # not a failure and must not raise an alarm on the dashboard.
+            if "execution_success" in ts:
+                state = "ok"
+            elif "execution_interrupted" in ts:
+                state = "cancel"
+            else:
+                state = "err"
+            last = (start, max(ends), state, hid, pct)
     elif run_start is None or start > run_start:
         run_start = start
 q = get("/queue") or {}
@@ -489,7 +522,7 @@ depth = len(run) + len(pend) if q else "-"
 gen = act = flag = fin = fid = cache = its = "-"
 if last:
     gen = "%.1f" % ((last[1] - last[0]) / 1000.0)
-    flag = "ok" if last[2] else "err"
+    flag = last[2]
     fin = time.strftime("%H:%M:%S", time.localtime(last[1] / 1000.0))
     fid = last[3]
     if last[4] is not None:
@@ -676,7 +709,8 @@ cmd_status() {
       [[ -n "$its" ]]       || its='-'
       gen_extra=''
       [[ "$gen_fin" != '-' ]]    && gen_extra="at $gen_fin"
-      [[ "$gen_flag" == 'err' ]] && gen_extra+=" ${RED}ERROR${RST}"
+      [[ "$gen_flag" == 'err' ]]    && gen_extra+=" ${RED}ERROR${RST}"
+      [[ "$gen_flag" == 'cancel' ]] && gen_extra+=" ${DIM}CANCELLED${RST}"
       [[ "$act_s" != '-' ]]      && gen_extra+="${gen_extra:+ · }now ${act_s}s…"
       # Session A/B aggregates: every gen that *finishes while the watch is
       # running* is recorded exactly once — whatever fin_id says on the first
@@ -687,6 +721,8 @@ cmd_status() {
       elif [[ "$fin_id" != '-' && "$fin_id" != "$g_base" ]]; then
         g_base="$fin_id"
         if [[ "$gen_flag" == 'err' ]]; then (( g_err++ )) || true
+        elif [[ "$gen_flag" == 'cancel' ]]; then :   # stopped by hand: not a
+          # failure, and its duration is meaningless, so it skews neither stat
         elif [[ "$gen_s" != '-' ]]; then g_durs+=("$gen_s"); fi
       fi
       [[ "$its" != '-' ]] && its_hist+=("$its")
@@ -1352,6 +1388,7 @@ _container_run_args() {
     -p "$PORT:8188"
     -v "$CONTAINER_IMAGE-cache:/home/comfy/.cache"
     -e SPARK_BF16
+    -e SPARK_BF16_VAE
     -e SPARK_STATIC_VRAM
     -e SPARK_RESERVE_VRAM
   )
