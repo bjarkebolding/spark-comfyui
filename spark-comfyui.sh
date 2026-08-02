@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.07.29.1 | License: MIT
+#  Version 2026.08.02 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -24,17 +24,22 @@
 #                              removes it.
 #    stop                      Stop ComfyUI (container, service or a stray
 #                              process).
-#    update [--torch|--rollback]
+#    update [--torch|--rollback|--keep[=NAME]]
 #                              Self-update this tool, then rebuild the image
 #                              on current ComfyUI master (cached layers make
 #                              that minutes, not a full build). The replaced
 #                              image stays tagged :previous; --rollback
 #                              swaps back to it instantly. --torch forces
 #                              fresh cu130 torch wheels (SageAttention
-#                              rebuilds on top). Optional: PRs/branches in
-#                              comfyui-patches.list (pr:<N> | branch:<name> |
-#                              remote:<url> <branch>) are merged on top of
-#                              upstream inside the image build.
+#                              rebuilds on top). --keep also pins the image
+#                              you are leaving as :keep-NAME (default:
+#                              today's date), which survives every later
+#                              update and 'prune' — that is how you snapshot
+#                              a build you know is good. Optional:
+#                              PRs/branches in comfyui-patches.list
+#                              (pr:<N> | branch:<name> | remote:<url>
+#                              <branch>) are merged on top of upstream
+#                              inside the image build.
 #    doctor                    Health check: self/update probe, host (driver,
 #                              docker runtime, image age, drift, swap,
 #                              backups), then the live GPU gates (torch CUDA,
@@ -62,10 +67,17 @@
 #                              re-clones custom nodes (their requirements
 #                              install at next start), and lists which
 #                              models you still need to fetch separately.
+#    prune [--yes]             Reclaim disk: drop leftover image tags and
+#                              trim the BuildKit cache to its age/size
+#                              limits. Keeps :latest, :previous and every
+#                              keep-* pin, so nothing you can still run or
+#                              roll back to is removed, and never rebuilds.
+#                              Shows exactly what goes before it goes.
 #    reset [--yes]             Remove the container, every image tag and the
 #                              cache volume, then rebuild from scratch. The
 #                              nuclear option; your content (data/) is
-#                              never touched.
+#                              never touched. Unlike prune, this DOES drop
+#                              keep-* pins.
 #
 #  Global options:
 #    --mounts PATH             Use PATH as the mounts config for this
@@ -98,7 +110,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.07.29.1"
+VERSION="2026.08.02"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -146,6 +158,21 @@ MODS_DIR="${MODS_DIR:-$BASE_DIR/mods}"
 # Container runtime: image and container name, both overridable.
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-spark-comfyui}"
 CONTAINER_NAME="${CONTAINER_NAME:-spark-comfyui}"
+# BuildKit cache retention. Each ComfyUI commit bump writes a fresh set of
+# ~11 GB layers into the build cache and nothing on the docker driver ever
+# collects them (field-found 2026-08-02: 96 GB reclaimable, all of it last
+# used within 6 days). 'update' trims after every build.
+#
+# Two limits, applied as two separate passes. Age bounds staleness when
+# rebuilds are rare, but it reclaims nothing at a daily cadence: 'until'
+# filters on LAST USED, and a near-daily rebuild keeps re-using every layer
+# (measured 2026-08-02: a 7-day pass over a 96 GB cache freed 0 B). The size
+# ceiling is therefore the limit that actually does the work. Eviction is
+# least-recently-used and the expensive stages (torch, the 10-30 min
+# SageAttention compile) are re-used by every build, so the ceiling reaches
+# them last, not first. Either limit set to 0 disables that pass.
+CACHE_KEEP_DAYS="${CACHE_KEEP_DAYS:-7}"
+CACHE_MAX_GB="${CACHE_MAX_GB:-40}"
 # Container-only layout: all user content under one
 # data/ directory, mount overrides in spark-mounts.conf next to the script.
 DATA_DIR="${DATA_DIR:-$BASE_DIR/data}"
@@ -1348,8 +1375,7 @@ cmd_build() {
   [[ -n "$comfy_sha" ]] \
     || die "could not resolve ComfyUI master from $REPO_URL (offline or
 unreachable) — check the network and re-run"
-  local date_tag; date_tag="$(date +%Y.%m.%d)"
-  log "Building $CONTAINER_IMAGE:$date_tag (ComfyUI ${comfy_sha:0:12}, SageAttention ${SAGE_REF:0:12})"
+  log "Building $CONTAINER_IMAGE:latest (ComfyUI ${comfy_sha:0:12}, SageAttention ${SAGE_REF:0:12})"
   echo "  First build downloads torch (>1 GB) and compiles SageAttention"
   echo "  (10-30 min). Rebuilds reuse every layer that didn't change."
   # --provenance=false: buildx otherwise attaches a provenance attestation
@@ -1366,12 +1392,95 @@ unreachable) — check the network and re-run"
     --build-arg COMFY_SHA="$comfy_sha" \
     --build-arg SAGE_REF="$SAGE_REF" \
     --build-arg ORT_WHEEL_URL="$ORT_WHEEL_URL" \
-    -t "$CONTAINER_IMAGE:$date_tag" \
     -t "$CONTAINER_IMAGE:latest" \
     "$@" \
     "$BASE_DIR"
-  log "Image ready: $CONTAINER_IMAGE:latest (also tagged :$date_tag)"
+  log "Image ready: $CONTAINER_IMAGE:latest"
   echo "  Launch it: $0 run"
+}
+
+# Only :latest and :previous are tool-managed, and only keep-* tags are
+# deliberate (made by 'update --keep'). Everything else under
+# $CONTAINER_IMAGE is accumulation. Until 2026.08.02 every build also
+# stamped a :YYYY.MM.DD tag that nothing ever read, so an install that has
+# been updated for a while pins one full ~11 GB image per build day.
+# Returns 0 with empty output when there is nothing to reclaim: grep exits 1
+# when it filters everything out, and under 'set -euo pipefail' that would
+# take the caller down with it (field-hit 2026-08-02: prune and the tail of
+# update died silently on a tidy box).
+_orphan_tags() {
+  docker images "$CONTAINER_IMAGE" --format '{{.Tag}}' 2>/dev/null \
+    | grep -vx -e latest -e previous -e '<none>' \
+    | grep -v '^keep-' | sort -u || true
+}
+
+# Untagged leftovers are invisible to a repository filter, so match them by
+# our own image label rather than running a global 'docker image prune',
+# which would also reap other projects' images on this host.
+_orphan_dangling() {
+  local id
+  docker images -f dangling=true -q 2>/dev/null | sort -u | while read -r id; do
+    [[ -n "$(docker image inspect -f \
+      '{{index .Config.Labels "org.spark-comfyui.comfy-sha"}}' "$id" 2>/dev/null)" ]] \
+      && echo "$id"
+  done
+  return 0
+}
+
+# Reclaimable BuildKit cache, in GB (integer, 0 when buildx is unavailable).
+_build_cache_gb() {
+  docker buildx du 2>/dev/null \
+    | awk '/^Reclaimable:/ {v=$2
+        if (v ~ /GB$/) {sub(/GB$/,"",v); printf "%d", v}
+        else if (v ~ /TB$/) {sub(/TB$/,"",v); printf "%d", v*1024}
+        else print 0
+        found=1}
+      END {if (!found) print 0}'
+}
+
+# Trim the build cache to its age and size limits (see the
+# CACHE_KEEP_DAYS/CACHE_MAX_GB rationale in the configuration block).
+#
+# TWO SEPARATE PASSES, never one call with both flags: --filter restricts
+# which records --max-used-space is even allowed to consider, so combining
+# them makes the ceiling apply only within the aged-out set and reclaim
+# nothing (field-verified 2026-08-02 on a 96 GB cache: combined call freed
+# 0 B, the ceiling alone freed 39.6 GB).
+#
+# --max-used-space, not --keep-storage: the latter is gone in buildx 0.27+.
+# The ceiling will not always land exactly on the limit — records still
+# referenced by a live image cannot be released — so this reports what was
+# actually freed rather than asserting the target.
+#
+# Never fatal: a failed trim costs disk, not a working install, and must not
+# sink an otherwise good update.
+prune_build_cache() {
+  local before after
+  before="$(_build_cache_gb)"
+  (( before > 0 )) || return 0
+  # Pass 1: drop what has not been touched in CACHE_KEEP_DAYS. Bounds
+  # staleness when rebuilds are rare; reclaims nothing at a daily cadence,
+  # where every layer keeps getting re-used.
+  if [[ "$CACHE_KEEP_DAYS" =~ ^[0-9]+$ ]]; then
+    (( CACHE_KEEP_DAYS > 0 )) \
+      && { docker builder prune -f --filter "until=$((CACHE_KEEP_DAYS * 24))h" >/dev/null 2>&1 || true; }
+  else
+    warn "CACHE_KEEP_DAYS is not a number — skipping the age pass"
+  fi
+  # Pass 2: evict least-recently-used down to the ceiling. This is the pass
+  # that actually bites at a fast rebuild cadence. The expensive stages
+  # (torch, SageAttention) are re-used by every build, so LRU reaches them
+  # last.
+  if [[ "$CACHE_MAX_GB" =~ ^[0-9]+$ ]]; then
+    (( CACHE_MAX_GB > 0 )) \
+      && { docker builder prune -f --max-used-space "$((CACHE_MAX_GB * 1024 * 1024 * 1024))" >/dev/null 2>&1 || true; }
+  else
+    warn "CACHE_MAX_GB is not a number — skipping the size pass"
+  fi
+  after="$(_build_cache_gb)"
+  (( before > after )) \
+    && log "Build cache: reclaimed $((before - after)) GB (${after} GB kept, limits: ${CACHE_KEEP_DAYS}d / ${CACHE_MAX_GB} GB)"
+  return 0
 }
 
 # Shared docker-run argument assembly for cmd_run (foreground,
@@ -1504,6 +1613,8 @@ cmd_reset() {
     echo "  This removes the container, ALL $CONTAINER_IMAGE image tags and the"
     echo "  cache volume, then rebuilds the image from scratch (no cache,"
     echo "  including the 10-30 min SageAttention compile)."
+    echo "  ALL tags means keep-* pins too — use '$0 prune' if you only"
+    echo "  want the disk back."
     echo "  Your content is not touched."
     local answer
     read -r -p "  Proceed? [y/N] " answer
@@ -1521,6 +1632,90 @@ cmd_reset() {
   docker volume rm "$CONTAINER_IMAGE-cache" >/dev/null 2>&1 \
     && log "Removed cache volume" || true
   cmd_build --no-cache
+}
+
+# Reclaim disk without touching anything the tool still needs: leftover
+# image tags (:latest, :previous and keep-* pins are never candidates) and
+# aged build cache. The counterpart to 'reset', which is the nuclear option;
+# prune is the routine one and never triggers a rebuild.
+cmd_prune() {
+  need_docker
+  local yes=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --yes|-y) yes=1 ;;
+      *) die "Unknown prune option: $arg (usage: $0 prune [--yes])" ;;
+    esac
+  done
+
+  local tags dangling cache_gb tag id n=0
+  tags="$(_orphan_tags)"
+  dangling="$(_orphan_dangling)"
+  cache_gb="$(_build_cache_gb)"
+
+  if [[ -z "$tags" && -z "$dangling" ]] && (( cache_gb == 0 )); then
+    log "Nothing to reclaim — no leftover image tags and no build cache"
+    return 0
+  fi
+
+  echo
+  if [[ -n "$tags" ]]; then
+    echo "  Leftover image tags (nothing references these):"
+    while read -r tag; do
+      [[ -n "$tag" ]] || continue
+      printf '    %-46s %s\n' "$CONTAINER_IMAGE:$tag" \
+        "$(docker images "$CONTAINER_IMAGE:$tag" --format '{{.Size}}' 2>/dev/null | head -1)"
+      n=$((n + 1))
+    done <<< "$tags"
+  fi
+  if [[ -n "$dangling" ]]; then
+    echo "  Untagged $CONTAINER_IMAGE images (matched by image label):"
+    while read -r id; do
+      [[ -n "$id" ]] || continue
+      printf '    %-46s %s\n' "$id" \
+        "$(docker images -f dangling=true --format '{{.ID}} {{.Size}}' | awk -v i="$id" '$1==i{print $2}')"
+      n=$((n + 1))
+    done <<< "$dangling"
+  fi
+  (( cache_gb > 0 )) \
+    && echo "  Build cache: $cache_gb GB reclaimable, trimming to ${CACHE_KEEP_DAYS}d / ${CACHE_MAX_GB} GB"
+  echo
+  echo "  Kept: $CONTAINER_IMAGE:latest, :previous, and every keep-* pin."
+  echo "  Your content (data/) and the run-time cache volume are not touched."
+  echo
+
+  if (( ! yes )); then
+    [[ -t 0 ]] || die "stdin is not a terminal — re-run with: $0 prune --yes"
+    local answer
+    read -r -p "  Remove the above? [y/N] " answer
+    [[ "$answer" == y || "$answer" == Y ]] || die "aborted — nothing removed"
+  fi
+
+  # Remove by tag, not by image id: an id shared with :latest would take the
+  # live image down with it. Untagging is enough; docker drops the image once
+  # its last reference goes.
+  while read -r tag; do
+    [[ -n "$tag" ]] || continue
+    docker rmi "$CONTAINER_IMAGE:$tag" >/dev/null 2>&1 \
+      || warn "could not remove $CONTAINER_IMAGE:$tag (in use by a container?)"
+  done <<< "$tags"
+  while read -r id; do
+    [[ -n "$id" ]] || continue
+    docker rmi "$id" >/dev/null 2>&1 \
+      || warn "could not remove untagged image $id (in use by a container?)"
+  done <<< "$dangling"
+  (( n > 0 )) && log "Removed $n leftover image(s)"
+  prune_build_cache
+  # The ceiling cannot reach layers the live images still reference, so a
+  # cache resting above CACHE_MAX_GB is normal, not a failed trim. Say that
+  # here rather than let the number look like the limit was ignored.
+  cache_gb="$(_build_cache_gb)"
+  if (( cache_gb > CACHE_MAX_GB )); then
+    info "build cache is $cache_gb GB, above the ${CACHE_MAX_GB} GB ceiling: the
+  remainder is layers :latest and :previous still reference, which only
+  'reset' releases"
+  fi
+  echo "  Disk now: $(df -h "$BASE_DIR" | awk 'NR==2 {print $4" free of "$2" ("$5" used)"}')"
 }
 
 stop_container() {
@@ -1541,11 +1736,15 @@ cmd_shell() {
 }
 
 cmd_update() {
-  local rollback=0 torch=0 arg
+  local rollback=0 torch=0 keep="" arg
   for arg in "$@"; do
     case "$arg" in
       --rollback) rollback=1 ;;
       --torch)    torch=1 ;;
+      --keep)     keep="$(date +%Y.%m.%d)" ;;
+      --keep=*)   keep="${arg#*=}"
+                  [[ "$keep" =~ ^[A-Za-z0-9._-]+$ ]] \
+                    || die "--keep name may only contain letters, digits, dot, dash and underscore: $keep" ;;
       *) die "Unknown update option: $arg" ;;
     esac
   done
@@ -1589,6 +1788,19 @@ cmd_update() {
   local before after
   before="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
   [[ -n "$before" ]] && docker tag "$before" "$CONTAINER_IMAGE:pre-update"
+  # --keep pins the image you are LEAVING, under a keep-* name. :previous
+  # already holds it, but the next update overwrites that; a pin survives
+  # every update and 'prune' leaves it alone, which is the whole point of
+  # snapshotting a build you know is good.
+  if [[ -n "$keep" ]]; then
+    if [[ -z "$before" ]]; then
+      warn "--keep: no current image to pin (nothing built yet) — ignoring"
+      keep=""
+    else
+      docker tag "$before" "$CONTAINER_IMAGE:keep-$keep"
+      log "Pinned the current image as $CONTAINER_IMAGE:keep-$keep"
+    fi
+  fi
   cmd_build "${build_args[@]}"
   after="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:latest")"
   if [[ "$before" == "$after" ]]; then
@@ -1604,6 +1816,12 @@ cmd_update() {
       log "Updated (first image — nothing previous to keep)"
     fi
   fi
+  [[ -n "$keep" ]] && echo "  Pinned build: $0 run is unaffected; start it with
+  CONTAINER_IMAGE tags via docker, or roll back to it by re-tagging it :latest"
+  prune_build_cache
+  local orphans; orphans="$(_orphan_tags)"
+  [[ -n "$orphans" ]] \
+    && info "$(printf '%s\n' "$orphans" | wc -l) leftover image tag(s) are holding disk — reclaim with: $0 prune"
   if [[ -n "$(docker ps -q -f "name=^${CONTAINER_NAME}$")" ]]; then
     warn "the running container still uses the old image — restart to pick up
 the update: $0 stop && $0 run"
@@ -1671,6 +1889,23 @@ cmd_doctor() {
     docker image inspect "$CONTAINER_IMAGE:previous" >/dev/null 2>&1 \
       && info "rollback point present ($CONTAINER_IMAGE:previous)" \
       || info "no rollback point yet (:previous appears after the first changing update)"
+    # Disk accounting: leftover tags and build cache are the two things that
+    # grow silently here, and a full root filesystem stops a rebuild dead.
+    local pins orphans cache_gb
+    pins="$(docker images "$CONTAINER_IMAGE" --format '{{.Tag}}' 2>/dev/null | grep '^keep-' | sort -u || true)"
+    [[ -n "$pins" ]] && info "pinned build(s): $(printf '%s' "$pins" | tr '\n' ' ')"
+    orphans="$(_orphan_tags)"
+    cache_gb="$(_build_cache_gb)"
+    # Only leftover tags are flagged: they are always fully reclaimable. The
+    # build cache is reported, never alarmed on — part of it is layers the
+    # live images reference, so it has a floor prune cannot cross and a
+    # threshold here would be a permanent false alarm (golden rule 5).
+    if [[ -n "$orphans" ]]; then
+      bad "$(printf '%s\n' "$orphans" | wc -l) leftover image tag(s) holding disk — reclaim with: $0 prune"
+    else
+      ok "image tags tidy (only :latest, :previous and any keep-* pins)"
+    fi
+    info "build cache $cache_gb GB (trimmed by update to ${CACHE_KEEP_DAYS}d / ${CACHE_MAX_GB} GB)"
     docker volume inspect "$CONTAINER_IMAGE-cache" >/dev/null 2>&1 \
       && info "cache volume $CONTAINER_IMAGE-cache present (pip + compiled CUDA
   kernels; safe to delete at the cost of a slower next start)" \
@@ -1847,6 +2082,7 @@ case "$CMD" in
   tune)     cmd_tune "$@" ;;
   backup)   cmd_backup "$@" ;;
   restore)  cmd_restore "$@" ;;
+  prune)    cmd_prune "$@" ;;
   reset)    cmd_reset "$@" ;;
   shell)    cmd_shell ;;
   # --- hidden backward-compat aliases (old command spellings still work) ---
@@ -1855,5 +2091,5 @@ case "$CMD" in
   rollback) cmd_update --rollback ;;
   ""|-h|--help|help) usage ;;
   -v|--version|version) echo "spark-comfyui $VERSION" ;;
-  *) die "Unknown command: $CMD (try: install | run | service | stop | update | doctor | status | tune | backup | restore | reset)" ;;
+  *) die "Unknown command: $CMD (try: install | run | service | stop | update | doctor | status | tune | backup | restore | prune | reset)" ;;
 esac

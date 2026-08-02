@@ -42,13 +42,16 @@ Models go in `data/models/checkpoints` (etc.). No venv, no system Python changes
 | `run [args...]` | Starts ComfyUI in the container, foreground. Every start installs custom-node requirements and live-verifies the GPU stack before serving. Extra args pass to `main.py`. |
 | `service [--disable]` | Same, detached with a docker restart policy: survives crashes and reboots. |
 | `stop` | Stops ComfyUI. |
-| `update [--torch] [--rollback]` | Self-updates the tool, then rebuilds the image on current ComfyUI master (cached layers: minutes). The old image stays as `:previous`; `--rollback` swaps back instantly. `--torch` forces fresh PyTorch wheels. |
+| `update [--torch] [--rollback] [--keep[=NAME]]` | Self-updates the tool, then rebuilds the image on current ComfyUI master (cached layers: minutes). The old image stays as `:previous`; `--rollback` swaps back instantly. `--torch` forces fresh PyTorch wheels. `--keep` also pins the image you are leaving as `:keep-NAME` (default: today's date), which survives every later update and `prune`. |
 | `doctor` | Health check: tool and host (driver, docker, image, swap, backups), then the live GPU gates (torch CUDA, sm_121 SageAttention kernel, onnxruntime provider, NVFP4) inside a throwaway container. Every failure names its fix. |
 | `status [--watch [SEC]]` | One-page glance, or a live sparkline dashboard with generation telemetry and a `session:` A/B summary. Every sample lands in `thermal_monitor.log`, the post-mortem trail for silent hard-reboots. |
 | `tune [--clock-cap MHZ] [--persist]` | Host stability: swap off, persistence mode, optional clock cap (~2100 fixes overcurrent hard-reboots). |
 | `backup [--with-output] [FILE]` | Small tgz of workflows, settings, inputs, configs and the custom-node set. Models are manifested, never archived. Safe while running. |
 | `restore FILE` | Rebuilds from a backup: image if missing, content into `data/`, custom nodes re-cloned at pinned commits, missing models listed with sizes. |
-| `reset [--yes]` | Removes the container, all image tags and the cache volume; rebuilds from scratch. `data/` is never touched. |
+| `prune [--yes]` | Reclaims disk: drops leftover image tags and trims the BuildKit cache to its age and size limits. Keeps `:latest`, `:previous` and every `keep-*` pin, and never rebuilds. Shows what goes before it goes. |
+| `reset [--yes]` | Removes the container, all image tags and the cache volume; rebuilds from scratch. `data/` is never touched. Unlike `prune`, this does drop `keep-*` pins. |
+
+Disk knobs, applied by `update` and `prune`: `CACHE_KEEP_DAYS` (default 7) drops build cache untouched for that long, `CACHE_MAX_GB` (default 40) caps its total size. Either at `0` disables that pass. The cap is the one that matters if you rebuild often, because the age filter measures last use and a frequent rebuild keeps every layer fresh.
 
 Runtime knobs, set at `run` time: `SPARK_RESERVE_VRAM=8` keeps 8 GB of the unified pool free (hardens against the overcommit freeze when pushing large models), `SPARK_BF16=0` disables the bf16 fast path, `SPARK_BF16_VAE=0` keeps that fast path but takes the VAE off bf16, `SPARK_STATIC_VRAM=1` disables DynamicVRAM.
 
@@ -128,6 +131,28 @@ Start with `./spark-comfyui.sh doctor`; every failure names its fix. Common ones
 - **A custom node will not load**: check the start log; the entrypoint installs each node's requirements and warns per node. A node needing a system library the image lacks is worth an issue.
 - **Silent hard-reboot during video generation**: `status --watch`, reproduce, read the last logged lines. A power spike right before death is overcurrent; fix with `tune --clock-cap 2100`.
 - **Machine freezes near memory limit**: swap thrash on unified memory; run `tune`.
+- **Docker is eating the disk**: `prune`. Images and BuildKit cache are the two things that grow silently, and a full filesystem stops a rebuild dead. It keeps `:latest`, `:previous` and every `keep-*` pin, shows exactly what goes first, and never rebuilds. `doctor` reports both numbers on every run.
+
+  ```console
+  $ ./spark-comfyui.sh prune --yes
+
+    Leftover image tags (nothing references these):
+      spark-comfyui:2026.07.26                       11.3GB
+      spark-comfyui:2026.07.27                       11.3GB
+      spark-comfyui:2026.07.28                       11.3GB
+      spark-comfyui:2026.07.29                       11.4GB
+      spark-comfyui:2026.07.31                       11.4GB
+      spark-comfyui:2026.08.02                       11.4GB
+    Untagged spark-comfyui images (matched by image label):
+      906dbbaf56d4                                   11.3GB
+    Build cache: 95 GB reclaimable, trimming to 7d / 40 GB
+
+    Kept: spark-comfyui:latest, :previous, and every keep-* pin.
+    Your content (data/) and the run-time cache volume are not touched.
+
+  ==> Removed 7 leftover image(s)
+    Disk now: 273G free of 917G (69% used)
+  ```
 - **LTX-2.3 audio workflows fail with `Input type (float) and bias type (c10::BFloat16)`**: the audio VAE never casts the input waveform to the VAE dtype, so it cannot run under `--bf16-vae`. This affects every LTX-2.3 audio workflow, including the templates ComfyUI ships. Start with `--no-bf16-vae`; the unet and text-encoder speedups are kept. You cannot fix this by passing `--fp32-vae` instead, because ComfyUI's VAE precision flags are mutually exclusive and the entrypoint has already added `--bf16-vae`.
 - **Not sure SageAttention is really active?**: on this build it cannot silently fall back to plain attention, the failure mode most Spark guides warn about. The image compiles a native sm_121 kernel, and every start runs a live multi-shape kernel test that refuses to launch if it fails. `doctor` runs the same gate on demand.
 
