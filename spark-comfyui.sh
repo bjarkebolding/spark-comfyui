@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.08.03 | License: MIT
+#  Version 2026.08.03.1 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -114,7 +114,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.08.03"
+VERSION="2026.08.03.1"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -141,7 +141,7 @@ ORT_WHEEL_URL="${ORT_WHEEL_URL:-https://huggingface.co/Jay0515/onnxruntime-gpu-a
 PORT="${PORT:-8188}"
 
 # Network resilience: the wheels involved are huge (torch cu130 is >1 GB,
-# the GPU onnxruntime ~220 MB) and a single dropped connection would abort
+# the GPU onnxruntime ~57 MB) and a single dropped connection would abort
 # a long install. Make pip retry transient failures instead of dying.
 export PIP_RETRIES="${PIP_RETRIES:-5}"
 export PIP_DEFAULT_TIMEOUT="${PIP_DEFAULT_TIMEOUT:-120}"

@@ -165,11 +165,13 @@ PY
 # a later 'pip install onnxruntime' (e.g. pulled in by a custom node)
 # overwrites the GPU wheel via the shared import path with no pip conflict.
 #
-# NOT CURRENTLY WIRED. The Dockerfile installs the pinned wheel at build
-# time, and doctor DETECTS the shadow trap via onnx_gpu_ok, but nothing
-# REPAIRS it the way mod 20 repairs torch on every start. This is the repair
-# half, kept ready for that decision (see the roadmap in CLAUDE.md). It is
-# the one function here with no caller; that is deliberate, not an oversight.
+# Called by container/entrypoint.sh on every start, right after the torch
+# guard and for the same reason: node installs are when shadowing happens.
+# The Dockerfile installs the pinned wheel at build time, doctor detects
+# drift, and this repairs it, which makes onnx symmetric with torch (mod 20).
+# The healthy path is one provider query and costs ~0.06s; only a genuinely
+# shadowed install pays the reinstall. The caller treats a failure as a warn,
+# never a die: CPU onnxruntime is a slowdown, not a broken server.
 ensure_onnx_gpu() {
   ORT_STATE="unknown"
   local pyver

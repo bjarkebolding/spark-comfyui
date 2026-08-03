@@ -87,7 +87,23 @@ log "Torch CUDA guard"
 ) || die "torch CUDA check failed — see the diag lines above. If the wheel
 set itself is broken, rebuild the image: spark-comfyui.sh update"
 
-# 3. SageAttention live kernel gate. The image build compiled it blind (no
+# 3. onnxruntime GPU guard, same placement logic as the torch guard: a custom
+#    node that pip installs onnxruntime shadows the sm_121 GPU wheel through
+#    the shared import path, with no pip conflict to notice. DWPose and the
+#    ControlNet preprocessors then silently run on CPU. The healthy case is
+#    one provider query (~0.06s measured), so this is cheap on every start;
+#    only a genuinely shadowed install pays the reinstall, which is a 57 MB
+#    wheel and took ~3s when tested against a real shadow.
+#    Warn, never die, unlike torch above: CPU onnxruntime is a slowdown, not
+#    a broken server, so it must not stop a launch. The '||' also suspends
+#    set -e inside the function, which is what keeps a failed pip from
+#    killing the entrypoint.
+log "onnxruntime GPU guard"
+ensure_onnx_gpu \
+  || warn "onnxruntime GPU guard did not complete — DWPose and ControlNet
+preprocessors may fall back to CPU this session (spark-comfyui.sh doctor re-checks)"
+
+# 4. SageAttention live kernel gate. The image build compiled it blind (no
 #    GPU exists at build time); this is where golden rule 3 now lives.
 log "SageAttention kernel gate"
 if sage_kernel_ok; then
@@ -98,13 +114,13 @@ else
 Rebuild the image: spark-comfyui.sh update"
 fi
 
-# 4. Manager config lives under the bind-mounted user/ dir, so it must be
+# 5. Manager config lives under the bind-mounted user/ dir, so it must be
 #    (re-)asserted at run time, not baked into the image.
 log "Manager config"
 python /opt/spark/mods/30-manager-config/configure.py apply \
   || warn "Manager config apply failed — continuing, Manager may be gated"
 
-# 5. Launch. Flags mirror the native cmd_run; exposure is controlled by the
+# 6. Launch. Flags mirror the native cmd_run; exposure is controlled by the
 #    host's port mapping, so --listen 0.0.0.0 here is scoped to the
 #    container's own network namespace.
 extra_flags=()
