@@ -166,18 +166,24 @@ RUN mkdir -p /home/comfy/.cache/pip /home/comfy/.cache/uv /home/comfy/.cache/nv-
 # cache (redirected into the cache volume so compiled sm_121 kernels
 # survive container recreation), NCCL P2P off, Triton pointed at the
 # copied CUDA 13 ptxas.
+# uv (the entrypoint's preferred installer for custom-node requirements) is
+# pointed at the same cache volume, so node deps survive container recreation
+# exactly like pip's downloads do. UV_LINK_MODE=copy because the cache volume
+# and the venv are different filesystems: uv would try to hardlink, fail, warn,
+# and fall back to copying anyway on every single install.
 ENV VIRTUAL_ENV=/opt/comfyui-env \
     PATH=/opt/comfyui-env/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     INSTALL_DIR=/opt/ComfyUI \
     VENV_DIR=/opt/comfyui-env \
     SAGE_REF=${SAGE_REF} \
-    SAGE_MARKER=/opt/comfyui-env/.sage_ok \
     TORCH_INDEX=${TORCH_INDEX} \
     ORT_WHEEL_URL=${ORT_WHEEL_URL} \
     CUDA_CACHE_PATH=/home/comfy/.cache/nv-compute \
     CUDA_CACHE_MAXSIZE=4294967296 \
     NCCL_P2P_DISABLE=1 \
-    TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
+    TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
+    UV_CACHE_DIR=/home/comfy/.cache/uv \
+    UV_LINK_MODE=copy
 
 # Consumed by backup (comfyui_commit in meta) and doctor on hosts that have
 # no ComfyUI checkout of their own.
@@ -185,4 +191,17 @@ LABEL org.spark-comfyui.comfy-sha=${COMFY_SHA} \
       org.spark-comfyui.sage-ref=${SAGE_REF}
 
 EXPOSE 8188
+
+# Liveness, for 'service' mode above all: a hung ComfyUI still looks "Up" to
+# docker, whose restart policy only ever reacts to an exit. This does NOT make
+# anything self-heal (restart policies ignore health by design) — it upgrades
+# "the process exists" into "the server answers", which is what 'status' and
+# 'doctor' report. /system_stats is a stock endpoint and needs no auth.
+# start-period is generous because the entrypoint installs custom-node
+# requirements and runs the GPU gates before main.py ever binds the port; a
+# large node set legitimately takes minutes, and health stays "starting"
+# (never "unhealthy") for that whole window.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8188/system_stats', timeout=4)" || exit 1
+
 ENTRYPOINT ["/opt/spark/entrypoint.sh"]

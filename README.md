@@ -27,7 +27,7 @@ Needs a DGX Spark (GB10) on DGX OS (docker, the NVIDIA Container Toolkit and the
 ```bash
 git clone https://github.com/bjarkebolding/spark-comfyui.git
 cd spark-comfyui
-./spark-comfyui.sh install          # one-time image build, 10-30 min
+./spark-comfyui.sh install          # one-time image build, about 5 min
 ./spark-comfyui.sh tune --persist   # recommended: swap off, persistence mode
 ./spark-comfyui.sh run              # UI at http://<spark-ip>:8188
 ```
@@ -40,7 +40,7 @@ Models go in `data/models/checkpoints` (etc.). No venv, no system Python changes
 |---|---|
 | `install` | Builds the image: ComfyUI at a pinned commit, cu130 PyTorch, SageAttention compiled for sm_121, GPU onnxruntime (sha256-pinned), GB10 mods. Idempotent. |
 | `run [args...]` | Starts ComfyUI in the container, foreground. Every start installs custom-node requirements and live-verifies the GPU stack before serving. Extra args pass to `main.py`. |
-| `service [--disable]` | Same, detached with a docker restart policy: survives crashes and reboots. |
+| `service [--disable]` | Same, detached with a docker restart policy: survives crashes and reboots. `docker ps` reports `healthy` once the server actually answers, not merely once the process exists. |
 | `stop` | Stops ComfyUI. |
 | `update [--torch] [--rollback] [--keep[=NAME]]` | Self-updates the tool, then rebuilds the image on current ComfyUI master (cached layers: minutes). The old image stays as `:previous`; `--rollback` swaps back instantly. `--torch` forces fresh PyTorch wheels. `--keep` also pins the image you are leaving as `:keep-NAME` (default: today's date), which survives every later update and `prune`. |
 | `doctor` | Health check: tool and host (driver, docker, image, swap, backups), then the live GPU gates (torch CUDA, sm_121 SageAttention kernel, onnxruntime provider, NVFP4) inside a throwaway container. Every failure names its fix. |
@@ -50,10 +50,11 @@ Models go in `data/models/checkpoints` (etc.). No venv, no system Python changes
 | `restore FILE` | Rebuilds from a backup: image if missing, content into `data/`, custom nodes re-cloned at pinned commits, missing models listed with sizes. |
 | `prune [--yes]` | Reclaims disk: drops leftover image tags and trims the BuildKit cache to its age and size limits. Keeps `:latest`, `:previous` and every `keep-*` pin, and never rebuilds. Shows what goes before it goes. |
 | `reset [--yes]` | Removes the container, all image tags and the cache volume; rebuilds from scratch. `data/` is never touched. Unlike `prune`, this does drop `keep-*` pins. |
+| `shell` | Opens a bash shell inside the running container. For inspecting the venv or a custom node. The image is immutable, so nothing you change there survives a restart. |
 
 Disk knobs, applied by `update` and `prune`: `CACHE_KEEP_DAYS` (default 7) drops build cache untouched for that long, `CACHE_MAX_GB` (default 40) caps its total size. Either at `0` disables that pass. The cap is the one that matters if you rebuild often, because the age filter measures last use and a frequent rebuild keeps every layer fresh.
 
-Runtime knobs, set at `run` time: `SPARK_RESERVE_VRAM=8` keeps 8 GB of the unified pool free (hardens against the overcommit freeze when pushing large models), `SPARK_BF16=0` disables the bf16 fast path, `SPARK_BF16_VAE=0` keeps that fast path but takes the VAE off bf16, `SPARK_STATIC_VRAM=1` disables DynamicVRAM.
+Runtime knobs, set at `run` time: `SPARK_RESERVE_VRAM=8` keeps 8 GB of the unified pool free (hardens against the overcommit freeze when pushing large models), `SPARK_BF16=0` disables the bf16 fast path, `SPARK_BF16_VAE=0` keeps that fast path but takes the VAE off bf16, `SPARK_STATIC_VRAM=1` disables DynamicVRAM, `SHM_SIZE` sets the container's `/dev/shm` ceiling (default `16g`, the Spark figure for large tensor transfers).
 
 The VAE one has a flag form, `--no-bf16-vae`, which works with any command:
 
@@ -128,7 +129,8 @@ The flag works with every command and must name a file that exists, so a typo fa
 Start with `./spark-comfyui.sh doctor`; every failure names its fix. Common ones:
 
 - **An update broke generation**: `update --rollback`, restart.
-- **A custom node will not load**: check the start log; the entrypoint installs each node's requirements and warns per node. A node needing a system library the image lacks is worth an issue.
+- **A custom node will not load**: check the start log; the entrypoint installs each node's requirements and warns per node. It uses `uv` when the venv has it and falls back to `pip`, so a node with pins too sloppy for uv's resolver still installs. A node needing a system library the image lacks is worth an issue.
+- **The container is up but the UI does not load**: `doctor`. A hung server still looks `Up` to docker, whose restart policy only reacts to an exit, so the image carries a health check against `/system_stats`. `doctor` turns that into a pass or a fail, and `status` says `NOT ANSWERING` next to the process line.
 - **Silent hard-reboot during video generation**: `status --watch`, reproduce, read the last logged lines. A power spike right before death is overcurrent; fix with `tune --clock-cap 2100`.
 - **Machine freezes near memory limit**: swap thrash on unified memory; run `tune`.
 - **Docker is eating the disk**: `prune`. Images and BuildKit cache are the two things that grow silently, and a full filesystem stops a rebuild dead. It keeps `:latest`, `:previous` and every `keep-*` pin, shows exactly what goes first, and never rebuilds. `doctor` reports both numbers on every run.

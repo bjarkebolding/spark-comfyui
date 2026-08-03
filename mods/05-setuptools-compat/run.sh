@@ -6,9 +6,9 @@
 #  requirements, can break that pin, which then breaks source builds
 #  (SageAttention uses torch's setuptools machinery at build time). Reads the
 #  constraint from torch's own metadata so it stays correct across versions.
-#  Not a source patch — a venv-package repair. Soft: if it can't determine or
-#  fix the pin, generation still works most of the time; only source builds
-#  (40-sageattention) are at risk, and that mod is critical on its own.
+#  Not a source patch — a venv-package repair. It runs in the image build
+#  (container/build-mods.sh), before ComfyUI's requirements and the custom
+#  node installs get a chance to move setuptools out of torch's range.
 # =============================================================================
 mod_describe() {
   echo "setuptools pinned within torch's declared constraint"

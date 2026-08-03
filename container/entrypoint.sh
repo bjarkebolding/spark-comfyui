@@ -13,6 +13,24 @@ die()  { printf '\033[1;31m[error] %s\033[0m\n' "$*" >&2; exit 1; }
 : "${INSTALL_DIR:?}" "${VENV_DIR:?}"
 cd "$INSTALL_DIR"
 
+# Package installs prefer uv, falling back to pip. This matters because 'run'
+# is --rm: the custom-node requirements pass below happens on EVERY launch, and
+# uv resolves and downloads in parallel against the same cache volume pip uses.
+# uv arrives with ComfyUI-Manager's own requirements, so it is present but not
+# guaranteed — a probe, not an assumption. pip stays the fallback for a second
+# reason: uv's resolver is stricter, and a node with sloppy pins that pip
+# tolerates must not be what stops the server from starting.
+UV="$(command -v uv || true)"
+INSTALLER="pip"
+[[ -n "$UV" ]] && INSTALLER="uv"
+py_install() {
+  if [[ -n "$UV" ]]; then
+    "$UV" pip install -q --python "$VENV_DIR/bin/python" "$@" </dev/null && return 0
+    warn "uv could not install this set — retrying the same set with pip"
+  fi
+  pip install -q "$@" </dev/null
+}
+
 # 1. Custom-node requirements. Manager clones nodes into the mounted
 #    custom_nodes dir, but their pip deps land in the container's writable
 #    layer and vanish on recreation, so a fresh container must install them.
@@ -35,10 +53,10 @@ elif [[ -f "$marker" ]] \
   info "requirements unchanged since this container's last start — skipping"
 else
   rm -f "$marker"
-  info "installing requirements for ${#req_files[@]} custom node(s)"
+  info "installing requirements for ${#req_files[@]} custom node(s) (via $INSTALLER)"
   pip_args=()
   for req in "${req_files[@]}"; do pip_args+=(-r "$req"); done
-  if pip install -q "${pip_args[@]}" </dev/null; then
+  if py_install "${pip_args[@]}"; then
     sha256sum "${req_files[@]}" > "$marker"
   else
     warn "combined install failed — retrying per node to isolate it"
@@ -46,8 +64,8 @@ else
     for req in "${req_files[@]}"; do
       node="$(basename "$(dirname "$req")")"
       info "custom node $node: installing requirements"
-      pip install -q -r "$req" </dev/null \
-        || { warn "pip install for custom node $node failed — the node may not load"; req_fail=1; }
+      py_install -r "$req" \
+        || { warn "installing requirements for custom node $node failed — the node may not load"; req_fail=1; }
     done
     # No marker after a failure: every start retries until the set heals.
     (( req_fail )) || sha256sum "${req_files[@]}" > "$marker"

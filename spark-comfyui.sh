@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.08.02 | License: MIT
+#  Version 2026.08.03 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -13,8 +13,8 @@
 #                              Container Toolkit, seeds the config templates,
 #                              builds the image (ComfyUI, cu130 torch, native
 #                              sm_121 SageAttention, GPU onnxruntime, GB10
-#                              mods baked in). No venv, no sudo. 10-30 min
-#                              the first time, minutes on rebuilds.
+#                              mods baked in). No venv, no sudo. About 5 min
+#                              from scratch, less on rebuilds.
 #    run [args...]             Start ComfyUI in the container, foreground
 #                              (Ctrl-C stops). Extra args pass to main.py.
 #                              Every start re-verifies the live GPU kernel
@@ -45,7 +45,7 @@
 #                              backups), then the live GPU gates (torch CUDA,
 #                              SageAttention sm_121 kernel, GPU onnxruntime,
 #                              NVFP4) run inside a throwaway container.
-#    status [--watch [SEC]]    One-page glance: process, GPU, memory, image.
+#    status [--watch|-w [SEC]] One-page glance: process, GPU, memory, image.
 #                              --watch shows a live dashboard (sparkline
 #                              timeseries: temp/power/clock/util/RAM/CPU,
 #                              every 5s or SEC) and appends every sample to
@@ -78,6 +78,10 @@
 #                              nuclear option; your content (data/) is
 #                              never touched. Unlike prune, this DOES drop
 #                              keep-* pins.
+#    shell                     Open a bash shell inside the RUNNING container
+#                              (docker exec). For poking at the venv or a
+#                              custom node; the image itself is immutable, so
+#                              nothing you change here survives a restart.
 #
 #  Global options:
 #    --mounts PATH             Use PATH as the mounts config for this
@@ -110,7 +114,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.08.02"
+VERSION="2026.08.03"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -150,14 +154,24 @@ export PIP_DEFAULT_TIMEOUT="${PIP_DEFAULT_TIMEOUT:-120}"
 # Lines starting with # and blank lines are ignored.
 PATCH_LIST="${PATCH_LIST:-$BASE_DIR/comfyui-patches.list}"
 
-# GB10 mods live in mods/<name>/run.sh and are discovered, applied, and
-# verified through a small contract (see mods/README.md). Toggle all mods
-# off with SPARK_SOURCE_PATCHES=0.
+# GB10 mods live in mods/<name>/run.sh and are applied through a small
+# contract (see mods/README.md). They run inside the image: build-time ones
+# in container/build-mods.sh, launch-time ones from container/entrypoint.sh.
+# There is no host-side mod pass and no off switch; a mod that does not
+# apply fails the image build loudly.
 MODS_DIR="${MODS_DIR:-$BASE_DIR/mods}"
 
 # Container runtime: image and container name, both overridable.
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-spark-comfyui}"
 CONTAINER_NAME="${CONTAINER_NAME:-spark-comfyui}"
+# /dev/shm ceiling inside the container. Docker's own default is 64 MB, which
+# is far too small for torch; this used to be 1g. The DGX Spark guidance is
+# 16g, to stop bus errors on the large tensor transfers the unified fabric
+# makes routine. Raising it is close to free: /dev/shm is a tmpfs, so this
+# caps what MAY be used, and unused capacity costs no memory at all. The
+# ceiling is real though — swap is off by design (see 'tune'), so anything
+# that actually fills 16 GB of shm spends it out of the unified pool.
+SHM_SIZE="${SHM_SIZE:-16g}"
 # BuildKit cache retention. Each ComfyUI commit bump writes a fresh set of
 # ~11 GB layers into the build cache and nothing on the docker driver ever
 # collects them (field-found 2026-08-02: 96 GB reclaimable, all of it last
@@ -168,7 +182,7 @@ CONTAINER_NAME="${CONTAINER_NAME:-spark-comfyui}"
 # filters on LAST USED, and a near-daily rebuild keeps re-using every layer
 # (measured 2026-08-02: a 7-day pass over a 96 GB cache freed 0 B). The size
 # ceiling is therefore the limit that actually does the work. Eviction is
-# least-recently-used and the expensive stages (torch, the 10-30 min
+# least-recently-used and the costliest stages (the torch download and the
 # SageAttention compile) are re-used by every build, so the ceiling reaches
 # them last, not first. Either limit set to 0 disables that pass.
 CACHE_KEEP_DAYS="${CACHE_KEEP_DAYS:-7}"
@@ -243,7 +257,8 @@ TPL
 install_self() {
   # The script anchors all paths to its own location (BASE_DIR), so wherever
   # it lives IS the install root — no need to copy it elsewhere. Just make
-  # sure it's executable so the systemd service and cron can invoke it.
+  # sure it stays executable, since a clone that lost the mode bit would
+  # break every later invocation, including self-update's re-exec.
   chmod +x "$SELF" 2>/dev/null || true
 }
 
@@ -876,18 +891,23 @@ cmd_status() {
     pid="$(pgrep -f 'main.py --listen' | head -1)"
     # Container processes are visible in the host process table, so the
     # same pgrep finds both worlds; the tag says which one this is.
-    command -v docker >/dev/null 2>&1 \
-      && [[ -n "$(docker ps -q -f "name=^${CONTAINER_NAME}$" 2>/dev/null)" ]] \
-      && where=", containerized"
+    if command -v docker >/dev/null 2>&1 \
+       && [[ -n "$(docker ps -q -f "name=^${CONTAINER_NAME}$" 2>/dev/null)" ]]; then
+      where=", containerized"
+      # Quiet when healthy: a serving container is what the line above already
+      # implies. The other two states are the ones a process check cannot see
+      # — alive but not answering, or not up yet.
+      case "$(_container_health)" in
+        starting)  where+=", still starting (not serving yet)" ;;
+        unhealthy) where+=", NOT ANSWERING" ;;
+      esac
+    fi
     echo "  ComfyUI RUNNING (pid $pid$where) -> http://$(hostname -I 2>/dev/null | awk '{print $1}'):$PORT"
     pgrep -af "main.py --listen" | grep -q "use-sage-attention" \
       && echo "  attention: SageAttention" || echo "  attention: PyTorch SDPA"
   else
     echo "  ComfyUI not running (start: $0 run)"
   fi
-  systemctl --user is-active comfyui.service >/dev/null 2>&1 \
-    && echo "  systemd service: active" || true
-
   hdr "GPU"
   nvidia-smi --query-gpu=name,temperature.gpu,power.draw,clocks.sm,memory.used,memory.total \
     --format=csv,noheader 2>/dev/null | sed 's/^/  /' || echo "  nvidia-smi unavailable"
@@ -1307,12 +1327,6 @@ The old ComfyUI/, comfyui-env/ and SageAttention/ trees are reproducible;
 delete them once you are satisfied."
 }
 
-# The single directory holding the whole USER_CONTENT set: the legacy
-# checkout (native layout) or DATA_DIR (container-only layout).
-# backup/restore operate through this root. Per-entry spark-mounts.conf
-# overrides scatter the set across parents, which backup/restore do not
-# support yet; that dies loudly instead of silently archiving half the
-# content.
 # Resolved host path for one USER_CONTENT entry (resolve_mounts must have
 # run in this shell). backup/restore go through this, so per-entry
 # spark-mounts.conf overrides are honored: the archive always uses entry
@@ -1376,8 +1390,9 @@ cmd_build() {
     || die "could not resolve ComfyUI master from $REPO_URL (offline or
 unreachable) — check the network and re-run"
   log "Building $CONTAINER_IMAGE:latest (ComfyUI ${comfy_sha:0:12}, SageAttention ${SAGE_REF:0:12})"
-  echo "  First build downloads torch (>1 GB) and compiles SageAttention"
-  echo "  (10-30 min). Rebuilds reuse every layer that didn't change."
+  echo "  First build downloads ~4 GB and compiles SageAttention; about"
+  echo "  5 min on a Spark, longer on a slow link. Rebuilds reuse every"
+  echo "  layer that didn't change."
   # --provenance=false: buildx otherwise attaches a provenance attestation
   # stamped with the build time, giving every build a fresh manifest digest
   # even when all layers are cached and the content is identical — which
@@ -1493,10 +1508,14 @@ _container_run_args() {
   docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1 \
     || die "image $CONTAINER_IMAGE:latest not found — run: $0 install"
   resolve_mounts
+  # Catch a malformed size here rather than after the mounts are resolved:
+  # docker's own error is fine but arrives further into the launch.
+  [[ "$SHM_SIZE" =~ ^[0-9]+[bkmgBKMG]?$ ]] \
+    || die "SHM_SIZE must be a docker size like 16g, 512m or a byte count (got: $SHM_SIZE)"
   CRUN_ARGS=(
     --name "$CONTAINER_NAME"
     --gpus all
-    --shm-size 1g
+    --shm-size "$SHM_SIZE"
     --cap-drop ALL
     --security-opt no-new-privileges
     -p "$PORT:8188"
@@ -1571,6 +1590,7 @@ cmd_service() {
   docker run -d --restart unless-stopped "${CRUN_ARGS[@]}" \
     "$CONTAINER_IMAGE:latest" >/dev/null
   echo "  Running detached on port $PORT; survives crashes and reboots."
+  echo "  Health:  docker ps shows 'healthy' once it is actually serving"
   echo "  Logs:    docker logs -f $CONTAINER_NAME"
   echo "  Stop:    $0 stop   (docker restarts it on next boot)"
   echo "  Disable: $0 service --disable"
@@ -1612,7 +1632,7 @@ cmd_reset() {
     [[ -t 0 ]] || die "stdin is not a terminal — re-run with: $0 reset --yes"
     echo "  This removes the container, ALL $CONTAINER_IMAGE image tags and the"
     echo "  cache volume, then rebuilds the image from scratch (no cache,"
-    echo "  including the 10-30 min SageAttention compile)."
+    echo "  including the SageAttention compile; about 5 min total)."
     echo "  ALL tags means keep-* pins too — use '$0 prune' if you only"
     echo "  want the disk back."
     echo "  Your content is not touched."
@@ -1718,6 +1738,16 @@ cmd_prune() {
   echo "  Disk now: $(df -h "$BASE_DIR" | awk 'NR==2 {print $4" free of "$2" ("$5" used)"}')"
 }
 
+# Health of the running container, from the image's HEALTHCHECK:
+# healthy | unhealthy | starting, or EMPTY when there is nothing to read —
+# no container, or one started from an image built before the healthcheck
+# existed (an older :previous, a keep-* pin). Empty means "no information",
+# never "bad": callers stay silent on it instead of inventing a failure.
+_container_health() {
+  docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' \
+    "$CONTAINER_NAME" 2>/dev/null || true
+}
+
 stop_container() {
   need_docker
   if [[ -n "$(docker ps -q -f "name=^${CONTAINER_NAME}$")" ]]; then
@@ -1816,8 +1846,11 @@ cmd_update() {
       log "Updated (first image — nothing previous to keep)"
     fi
   fi
-  [[ -n "$keep" ]] && echo "  Pinned build: $0 run is unaffected; start it with
-  CONTAINER_IMAGE tags via docker, or roll back to it by re-tagging it :latest"
+  # Be concrete: CONTAINER_IMAGE is a repository name and every call site
+  # appends ':latest', so there is no env var that selects a pin. Re-tagging
+  # is the supported way, and it is one command.
+  [[ -n "$keep" ]] && echo "  Pinned build: '$0 run' still runs :latest. To go back to the pin:
+    docker tag $CONTAINER_IMAGE:keep-$keep $CONTAINER_IMAGE:latest && $0 stop && $0 run"
   prune_build_cache
   local orphans; orphans="$(_orphan_tags)"
   [[ -n "$orphans" ]] \
@@ -1924,6 +1957,17 @@ cmd_doctor() {
     else
       ok "container running ($(docker ps -f "id=$cid" --format '{{.Status}}'))"
     fi
+    # The image's HEALTHCHECK turns "the process is up" into "the server
+    # answers", which is the distinction 'service' mode cannot make on its own:
+    # a docker restart policy only ever reacts to an exit, never to a hang.
+    # No arm matches on an image built before the healthcheck existed.
+    case "$(_container_health)" in
+      healthy)   ok "container answers on /system_stats" ;;
+      unhealthy) bad "container is up but not answering on /system_stats — hung
+  or failed after launch; read: docker logs $CONTAINER_NAME" ;;
+      starting)  info "container is inside its health start window (custom-node
+  requirements and the GPU gates run before main.py binds the port)" ;;
+    esac
   else
     info "container not running"
   fi
@@ -1981,9 +2025,6 @@ set -uo pipefail
 ok()   { printf '  \033[1;32m[PASS]\033[0m %s\n' "$*"; }
 bad()  { printf '  \033[1;31m[FAIL]\033[0m %s\n' "$*"; fails=$((fails+1)); }
 log()  { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
-warn() { printf '\033[1;33m[warn] %s\033[0m\n' "$*"; }
-die()  { printf '\033[1;31m[error] %s\033[0m\n' "$*" >&2; exit 1; }
-info() { printf '  \033[1;36m[info]\033[0m %s\n' "$*"; }
 fails=0
 source /opt/spark/mods/_lib/mod_common.sh
 
@@ -2091,5 +2132,5 @@ case "$CMD" in
   rollback) cmd_update --rollback ;;
   ""|-h|--help|help) usage ;;
   -v|--version|version) echo "spark-comfyui $VERSION" ;;
-  *) die "Unknown command: $CMD (try: install | run | service | stop | update | doctor | status | tune | backup | restore | prune | reset)" ;;
+  *) die "Unknown command: $CMD (try: install | run | service | stop | update | doctor | status | tune | backup | restore | prune | reset | shell)" ;;
 esac

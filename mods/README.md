@@ -1,18 +1,20 @@
 # mods/
 
-Each subdirectory is a self-contained modification that `spark-comfyui.sh`
-discovers, applies, and verifies. Mods run in **filename order**, so the
-numeric prefix (`05-`, `10-`, `20-`, ...) controls sequence. This matters for
-real dependencies: setuptools is pinned correctly (`05`) before torch is
-verified (`20`) before SageAttention builds from source (`40`).
+Each subdirectory is a self-contained, idempotent modification. Mods run in
+filename order, so the numeric prefix (`05-`, `10-`, `20-`, `30-`) controls
+sequence.
 
-Two flavors live here side by side under one contract. **Source-patch mods**
-edit ComfyUI's own Python (`10-unified-memory-free`) or its config tree
-(`30-manager-config`). **Venv-package mods** install/verify/repair things in
-the virtualenv (`05-setuptools-compat`, `20-torch-repair`, `40-sageattention`,
-`50-onnxruntime-gpu`). The latter use the contract extensions below
-(`MOD_CRITICAL`, `MOD_STREAM`, `mod_export`, `mod_prerun`); source-patch mods
-don't need any of them.
+Mods run **inside the image**, in one of two places. There is no host-side mod
+pass.
+
+| Where | Runner | Mods | Why there |
+|---|---|---|---|
+| Image build | `container/build-mods.sh` | `05-setuptools-compat`, `10-unified-memory-free` | Need neither a GPU nor user content, so they bake into the image. A failed apply or verify fails the build. |
+| Every launch | `container/entrypoint.sh` | `20-torch-repair` (via `mod_prerun`), `30-manager-config` (via `configure.py`) | Need the GPU or the bind-mounted user directory, neither of which exists at build time. |
+
+Adding a build-time mod means dropping in `mods/NN-name/` **and** adding it to
+the list in `container/build-mods.sh`. Adding launch-time behavior means
+editing `container/entrypoint.sh`.
 
 ## Anatomy of a mod
 
@@ -28,30 +30,28 @@ mods/
 
 ## The contract
 
-Every `run.sh` is sourced (not executed) by the main script with
-`_lib/mod_common.sh` already loaded and these variables exported:
-`INSTALL_DIR`, `VENV_DIR`, and `MOD_DIR` (the mod's own directory). It must
-define three shell functions:
+Every `run.sh` is sourced, not executed, with `_lib/mod_common.sh` already
+loaded and `INSTALL_DIR`, `VENV_DIR` and `MOD_DIR` set. It defines three shell
+functions:
 
 | Function | Returns | Purpose |
 |---|---|---|
-| `mod_describe` | echoes one line | Human description, shown in `doctor`/summaries |
+| `mod_describe` | echoes one line | Human description, printed by the runner |
 | `mod_apply` | echoes a status word, returns 0 | Applies the mod idempotently |
-| `mod_verify` | exit 0 = active, 1 = not | Checks whether the mod is currently in effect |
+| `mod_verify` | exit 0 = active, 1 = not | Is the mod currently in effect |
 
-`mod_apply` should echo one of: `applied`, `present` (already there),
-or `skipped:<reason>`. The helpers in `mod_common.sh` do this for you.
-(Streamed mods report status differently, see below.)
+`mod_apply` echoes one of `applied`, `present` or `skipped:<reason>` as its
+first token. The helpers in `mod_common.sh` do that for you.
 
-It may optionally define a fourth function:
+It may optionally define a fourth:
 
 | Function | Returns | Purpose |
 |---|---|---|
-| `mod_prerun` | returns 0/1 | Runs before **every** `run`, not just install/update. Absence is a silent no-op. Only define this if your mod needs a cheap pre-launch guard. |
+| `mod_prerun` | returns 0/1 | Runs before every launch, from the entrypoint. Absence is a silent no-op. Only for a cheap pre-launch guard, as in `20-torch-repair`. |
 
 ## Writing a source patch
 
-Most source-patch mods edit a ComfyUI Python file. Use the helpers:
+Most source-patch mods edit one ComfyUI Python file. Use the helpers:
 
 ```sh
 MOD_TAG="my_fix"
@@ -62,66 +62,21 @@ mod_verify()   { py_marker_present "$MOD_FILE" "$MOD_TAG"; }
 ```
 
 `transform.py` reads the source on stdin, writes the patched source to stdout,
-and **must echo the input unchanged if it can't find its anchor**. That is how
-"upstream changed" is detected. The marker string arrives via `$MARKER`.
+and **must echo the input unchanged if it cannot find its anchor**. That is how
+"upstream moved the code" is detected: it surfaces as
+`skipped:anchor-not-found`, which fails the image build loudly. The marker
+string arrives via `$MARKER`.
 
-`py_patch_file` handles everything else: the idempotency check, a
-`.spark-orig` backup refreshed on every apply (so it always holds the
-current pre-patch upstream version), and a post-write `ast.parse` guard that
-reverts the file if the patch would have produced invalid Python. Patches
-are re-applied after every `git pull`, so they self-heal across ComfyUI
-updates.
+`py_patch_file` handles the rest: the idempotency check, a `.spark-orig` backup
+refreshed on every apply, and a post-write `ast.parse` guard that reverts the
+file if the patch would have produced invalid Python.
 
-## Writing a venv-package mod (critical / streaming / stateful)
+Test a transform against a realistic fixture and confirm the result still
+parses before shipping it. That is a golden rule, not a suggestion.
 
-Building SageAttention, repairing a shadowed torch, etc. don't fit the
-default contract as-is. They can take minutes (buffering their output until
-`mod_apply` returns would hide all progress), their failure genuinely breaks
-the install (it should abort loudly, not degrade to a soft skip), and their
-caller sometimes needs a value back (e.g. the update summary's
-"SageAttention: rebuilt & verified" line). Three opt-in additions cover this:
+## Vestigial flags
 
-```sh
-MOD_CRITICAL=1   # a nonzero exit from mod_apply/mod_prerun aborts the whole
-                 # script (die) instead of being reported as skipped:error.
-                 # Use for steps whose failure means the install/launch is
-                 # genuinely broken. Leave unset for anything where a failure
-                 # should just mean "this optimization is inactive". That is
-                 # the right default; most mods should NOT set this.
-
-MOD_STREAM=1     # mod_apply/mod_prerun output streams live to the terminal
-                 # instead of being buffered until it finishes. Set this for
-                 # anything that can take more than a few seconds.
-```
-
-A streamed mod can't rely on its echoed stdout for status (stdout isn't
-captured). Report status via `mod_export` instead, and use it for any other
-value the caller needs:
-
-```sh
-mod_apply() {
-  ...
-  mod_export "STATUS=applied rebuilt & verified"
-  mod_export "SAGE_ACTION=rebuilt & verified"   # read back by cmd_update
-}
-```
-
-`mod_export KEY=value` appends to `$MOD_STATE_FILE`; the runner reads it back
-after the mod returns and sets each `KEY` as a global in the calling
-function's scope, whether or not the mod is streamed. Only the `STATUS=`
-key's meaning is streaming-specific (it replaces the echoed-stdout status
-line; non-streamed mods keep using the echoed-first-token protocol from "The
-contract" above). `50-onnxruntime-gpu` exports `ORT_STATE` this way, and is
-itself streamed too (its wheel download can take a while).
-
-Exported keys are **allowlisted** in the runner (`_export_mod_state` in
-spark-comfyui.sh, currently `SAGE_ACTION` and `ORT_STATE`; `STATUS` is
-handled separately). A key not on the list is silently ignored. This stops a
-mod typo, or a third-party mod, from overwriting arbitrary main-script
-globals like `INSTALL_DIR` mid-run. If your mod needs to hand a new value
-back, add the key to that pattern in the same change (one line, deliberate).
-
-## Disabling mods
-
-Set `SPARK_SOURCE_PATCHES=0` in the environment to skip all mods, including
-the pre-launch `mod_prerun` guard.
+`MOD_CRITICAL` and `MOD_STREAM` were read by the native runner, which was
+deleted with the container cut. `20-torch-repair` still declares them as
+documentation of intent. Nothing reads them. Do not build new behavior on
+them.

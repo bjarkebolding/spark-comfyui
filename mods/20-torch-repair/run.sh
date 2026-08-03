@@ -3,12 +3,11 @@
 #  mod: 20-torch-repair
 #  requirements.txt / custom nodes / build deps can silently replace the CUDA
 #  build of torch with a CPU-only one. This mod verifies and repairs it — at
-#  install/update time (mod_apply) AND before every single 'run' (mod_prerun,
-#  ComfyUI's quick guard against a custom node clobbering torch since the
-#  last launch). Critical: a broken torch means nothing on the GPU works, so
-#  failure aborts loudly rather than being reported as a soft skip. Streamed:
-#  a repair reinstalls the full cu130 wheel set (>1 GB), so the user should
-#  see progress, not a silent multi-minute pause.
+#  build time (mod_apply, if ever added to container/build-mods.sh) AND before
+#  every single launch (mod_prerun, which the entrypoint calls — the quick
+#  guard against a custom node clobbering torch since the last start). A
+#  broken torch means nothing on the GPU works, so mod_prerun's failure aborts
+#  the launch loudly rather than degrading quietly.
 # =============================================================================
 # shellcheck disable=SC2034  # mod-contract flag; retained as docs (CLAUDE.md), no runner reads it now
 MOD_CRITICAL=1
@@ -21,12 +20,12 @@ mod_describe() {
 
 mod_apply() {
   if mod_verify; then
-    mod_export "STATUS=present"
+    echo "present"
     return 0
   fi
   repair_torch
   if mod_verify; then
-    mod_export "STATUS=applied repaired CUDA torch"
+    echo "applied repaired CUDA torch"
   else
     # still broken after repair — critical, this must abort loudly, and the
     # diag names the actual CUDA error (is_available() swallows it)
