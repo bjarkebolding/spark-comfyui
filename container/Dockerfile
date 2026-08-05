@@ -146,13 +146,30 @@ ARG SAGE_REF
 ARG TORCH_INDEX
 ARG ORT_WHEEL_URL
 ENV DEBIAN_FRONTEND=noninteractive
-# The X client libs are for ComfyUI's stock GLSL nodes (bundled ANGLE
-# links libX11/libXext/libxcb even headless); git is for Manager's node
-# installs inside the container.
+# Two separate reasons this slim runtime image carries graphics libraries at
+# all, neither of which is about drawing anything:
+#   libx11-6 libxext6 libxcb1  ComfyUI's stock GLSL nodes dlopen a bundled
+#                              ANGLE that links libX11/libXext/libxcb even
+#                              headless.
+#   libgl1 libglib2.0-0t64     opencv-python links libGL.so.1, libglib-2.0
+#                              and libgthread-2.0. It is one of the most
+#                              common custom-node dependencies, so without
+#                              these any node importing cv2 dies with
+#                              "libGL.so.1: cannot open shared object file"
+#                              and ComfyUI carries on without it (field-hit
+#                              2026-08-06 with comfyui-videohelpersuite).
+#                              Exactly these two packages: they cover the
+#                              three libraries ldd actually reported missing,
+#                              and nothing else was.
+# NOTE the t64 suffix. Ubuntu 24.04's time_t transition renamed the glib
+# package, and plain 'libglib2.0-0' has NO installation candidate here, so
+# the name every search result gives you fails the build.
+# git is for Manager's node installs inside the container.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates python3 python3-venv python3-dev python3-pip \
       build-essential \
       libx11-6 libxext6 libxcb1 \
+      libgl1 libglib2.0-0t64 \
     && rm -rf /var/lib/apt/lists/*
 RUN userdel -r ubuntu 2>/dev/null || true \
  && useradd -m -u ${UID} comfy \
