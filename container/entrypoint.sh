@@ -101,24 +101,57 @@ else
       info "${#node_entries[@]} listed node(s) already present — nothing to install"
     else
       info "reconciling ${#node_todo[@]} of ${#node_entries[@]} listed node(s) via cm-cli"
+      # One call per entry so a failure names the node instead of hiding in a
+      # batch. COMFYUI_PATH is mandatory (cm-cli exits immediately without
+      # it); </dev/null keeps a prompting git clone from eating the loop's
+      # stdin; timeout keeps a hung registry off the launch path.
+      #
+      # --exit-on-fail is REQUIRED, not cosmetic: cm-cli's default is
+      # --no-exit-on-fail, under which a failed install prints a red ERROR and
+      # still exits 0 (field-verified 2026-08-05 with a nonexistent id). Even
+      # with it, a spec that resolves to nothing returns silently, so the exit
+      # code is necessary but not sufficient. Golden rule 3: the live check is
+      # whether the node is actually on disk afterwards.
+      node_install_once() {
+        COMFYUI_PATH="$INSTALL_DIR" timeout 600 cm-cli install --exit-on-fail "$1" </dev/null \
+          && [[ -d "$INSTALL_DIR/custom_nodes/$(node_dir_for "$1")" ]]
+      }
       node_fail=0
+      cache_warmed=0
       for entry in "${node_todo[@]}"; do
-        # One call per entry so a failure names the node instead of hiding in
-        # a batch. COMFYUI_PATH is mandatory (cm-cli exits immediately
-        # without it); </dev/null keeps a prompting git clone from eating
-        # this loop's stdin; timeout keeps a hung registry off the launch path.
-        #
-        # --exit-on-fail is REQUIRED, not cosmetic: cm-cli's default is
-        # --no-exit-on-fail, under which a failed install prints a red ERROR
-        # and still exits 0 (field-verified 2026-08-05 with a nonexistent id).
-        # Even with it, a spec that resolves to nothing returns silently, so
-        # the exit code is necessary but not sufficient. Golden rule 3: the
-        # live check is whether the node is actually on disk afterwards.
-        if ! COMFYUI_PATH="$INSTALL_DIR" timeout 600 cm-cli install --exit-on-fail "$entry" </dev/null \
-           || [[ ! -d "$INSTALL_DIR/custom_nodes/$(node_dir_for "$entry")" ]]; then
-          warn "node '$entry' did not install — continuing without it"
-          node_fail=1
+        node_install_once "$entry" && continue
+        # A COLD box has no Manager registry cache, and the catalogue bundled
+        # in the pip package does not carry every registry node. Field-hit
+        # 2026-08-06 after a data/ wipe: the bundled list holds 3587 entries
+        # and zero matches for a node that installs fine once the cache is
+        # warm, so the first start after a wipe silently got no nodes.
+        # Refresh once per start, then retry. Reactive rather than always-on,
+        # so a warm box pays nothing, and it also heals a cache too old to
+        # know about a recently published node.
+        if (( ! cache_warmed )); then
+          cache_warmed=1
+          # Heartbeat, not silence. The fetch takes a few minutes on a cold
+          # box and this is the launch path, so a run with no output for that
+          # long is indistinguishable from a hang (field-hit 2026-08-06: it
+          # was reported as stuck while working normally). A \r spinner is
+          # wrong here: 'run' is docker run WITHOUT -t, so stdout is a pipe
+          # and only newline-terminated lines render sanely in the log.
+          info "registry cache is cold — fetching the node catalogue"
+          info "  (a few minutes on a first run; every later start skips this)"
+          COMFYUI_PATH="$INSTALL_DIR" timeout 600 cm-cli update-cache </dev/null >/dev/null 2>&1 &
+          cache_pid=$!
+          cache_secs=0
+          while kill -0 "$cache_pid" 2>/dev/null; do
+            sleep 20
+            cache_secs=$((cache_secs+20))
+            kill -0 "$cache_pid" 2>/dev/null && info "  still fetching ... ${cache_secs}s"
+          done
+          wait "$cache_pid" || true
+          info "  catalogue fetched in ${cache_secs}s — retrying $entry"
+          node_install_once "$entry" && continue
         fi
+        warn "node '$entry' did not install — continuing without it"
+        node_fail=1
       done
       if (( node_fail )); then
         warn "one or more listed nodes are missing; the next start retries them"
