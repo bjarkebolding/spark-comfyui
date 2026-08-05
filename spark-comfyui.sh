@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.08.05 | License: MIT
+#  Version 2026.08.05.1 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -18,7 +18,9 @@
 #    run [args...]             Start ComfyUI in the container, foreground
 #                              (Ctrl-C stops). Extra args pass to main.py.
 #                              Every start re-verifies the live GPU kernel
-#                              gates and installs custom-node requirements.
+#                              gates, installs any Comfy Registry nodes
+#                              listed in comfyui-nodes.list, and installs
+#                              custom-node requirements.
 #    service [--disable]       Same, detached with a docker restart policy:
 #                              survives crashes and reboots. --disable
 #                              removes it.
@@ -58,7 +60,7 @@
 #                              hard-reboots). --persist survives reboots.
 #    backup [--with-output] [FILE]
 #                              Archive the small precious state: workflows,
-#                              settings, inputs, patch list, custom-node list,
+#                              settings, inputs, patch and node lists,
 #                              and a manifest of your models (listed, never
 #                              copied — they are huge). --with-output also
 #                              archives generated images. Safe while running.
@@ -114,7 +116,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.08.05"
+VERSION="2026.08.05.1"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -153,6 +155,17 @@ export PIP_DEFAULT_TIMEOUT="${PIP_DEFAULT_TIMEOUT:-120}"
 #   remote:https://github.com/u/ComfyUI.git their-branch   # a fork's branch
 # Lines starting with # and blank lines are ignored.
 PATCH_LIST="${PATCH_LIST:-$BASE_DIR/comfyui-patches.list}"
+
+# Comfy Registry nodes installed on every container start. The run-time
+# counterpart to the patch list above: patches are a build input baked into
+# the image, custom nodes live in the bind-mounted custom_nodes dir and so
+# can only be reconciled at launch. Mounted read-only into the container and
+# read by the entrypoint, which shells out to Manager's own cm-cli.
+#   some-node-id                       # latest release
+#   some-node-id@1.2.3                 # pinned version
+#   https://github.com/u/repo.git      # direct clone
+# Lines starting with # and blank lines are ignored.
+NODES_LIST="${NODES_LIST:-$BASE_DIR/comfyui-nodes.list}"
 
 # GB10 mods live in mods/<name>/run.sh and are applied through a small
 # contract (see mods/README.md). They run inside the image: build-time ones
@@ -251,6 +264,31 @@ seed_patch_list() {
 # remote:https://github.com/stardust7700/ComfyUI.git master
 TPL
   echo "Seeded patch-list template: $PATCH_LIST (empty — all comments)"
+}
+
+# Seed the node list. Unlike the patch-list template this one ships a LIVE
+# entry, so a fresh install pulls one third-party node from the registry.
+# That is a deliberate default (README security notes say so); commenting the
+# line out is all it takes to opt back out.
+seed_nodes_list() {
+  [[ -f "$NODES_LIST" ]] && return 0
+  cat > "$NODES_LIST" <<'TPL'
+# comfyui-nodes.list — Comfy Registry nodes installed on every container
+# start, one per line, in order. Formats:
+#   some-node-id                       latest release
+#   some-node-id@1.2.3                 pinned version
+#   some-node-id@nightly               git HEAD
+#   https://github.com/user/repo.git   direct clone
+#
+# Already-installed nodes are skipped, so a start with nothing to do costs
+# nothing. Removing a line stops future installs; it does NOT uninstall a
+# node that is already there.
+#
+# Browse ids at https://registry.comfy.org.
+
+comfyui-workflow-models-downloader
+TPL
+  echo "Seeded node list: $NODES_LIST (1 entry: comfyui-workflow-models-downloader)"
 }
 
 
@@ -928,8 +966,14 @@ cmd_status() {
   else
     echo "  ComfyUI: no image built yet (run: $0 install)"
   fi
+  local nent
   if [[ -f "$PATCH_LIST" ]] && grep -qE '^[^#[:space:]]' "$PATCH_LIST"; then
-    echo "  patch list: $(grep -cE '^[^#[:space:]]' "$PATCH_LIST") entries in $PATCH_LIST"
+    nent="$(grep -cE '^[^#[:space:]]' "$PATCH_LIST")"
+    echo "  patch list: $nent entr$( ((nent==1)) && echo y || echo ies) in $PATCH_LIST"
+  fi
+  if [[ -f "$NODES_LIST" ]] && grep -qE '^[^#[:space:]]' "$NODES_LIST"; then
+    nent="$(grep -cE '^[^#[:space:]]' "$NODES_LIST")"
+    echo "  node list: $nent entr$( ((nent==1)) && echo y || echo ies) in $NODES_LIST"
   fi
   # The Manager config lives under the resolved user mount.
   resolve_mounts
@@ -1025,6 +1069,7 @@ cmd_backup() {
   } > "$stage/meta"
 
   [[ -f "$PATCH_LIST" ]] && cp -a "$PATCH_LIST" "$stage/comfyui-patches.list"
+  [[ -f "$NODES_LIST" ]] && cp -a "$NODES_LIST" "$stage/comfyui-nodes.list"
   [[ -f "$mp_yaml" ]] && cp -a "$mp_yaml" "$stage/extra_model_paths.yaml"
 
   # Custom nodes: git clones become manifest lines (url + commit, re-cloned on
@@ -1064,6 +1109,7 @@ cmd_backup() {
   # settings/workflow trees that is acceptable.
   local members=(-C "$stage" meta models.manifest custom-nodes.manifest)
   [[ -f "$stage/comfyui-patches.list" ]]   && members+=(comfyui-patches.list)
+  [[ -f "$stage/comfyui-nodes.list" ]]     && members+=(comfyui-nodes.list)
   [[ -f "$stage/extra_model_paths.yaml" ]] && members+=(extra_model_paths.yaml)
   [[ -d "$stage/custom_nodes_plain" ]]     && members+=(custom_nodes_plain)
   if [[ -d "$mp_user" ]]; then
@@ -1123,12 +1169,13 @@ cmd_restore() {
     echo "  merged $d/"
   done
   local src dst
-  for d in extra_model_paths.yaml comfyui-patches.list; do
+  for d in extra_model_paths.yaml comfyui-patches.list comfyui-nodes.list; do
     src="$stage/$d"
     [[ -f "$src" ]] || continue
     case "$d" in
       extra_model_paths.yaml) dst="$(_mount_path extra_model_paths.yaml)" ;;
       comfyui-patches.list)   dst="$PATCH_LIST" ;;
+      comfyui-nodes.list)     dst="$NODES_LIST" ;;
       *) continue ;;   # a list entry without a case arm must not reuse $dst
     esac
     if [[ -f "$dst" ]] && ! cmp -s "$src" "$dst"; then
@@ -1525,6 +1572,13 @@ _container_run_args() {
     -e SPARK_STATIC_VRAM
     -e SPARK_RESERVE_VRAM
   )
+  # The node list is a script-adjacent config file like the patch list, not
+  # user content, so it is mounted directly rather than going through the
+  # mount contract. Read-only: the entrypoint reads it, nothing writes it.
+  # Absent is a valid state (an install that predates it, or a deleted file);
+  # the entrypoint says so and moves on.
+  [[ -f "$NODES_LIST" ]] \
+    && CRUN_ARGS+=(-v "$NODES_LIST:/opt/spark/comfyui-nodes.list:ro")
   local entry host i
   for i in "${!RESOLVED_ENTRIES[@]}"; do
     entry="${RESOLVED_ENTRIES[$i]}" host="${RESOLVED_PATHS[$i]}"
@@ -1604,6 +1658,7 @@ cmd_install() {
   install_self
   seed_mounts_conf
   seed_patch_list
+  seed_nodes_list
   mkdir -p "$DATA_DIR"
   cmd_build
   local ip_hint
@@ -1800,6 +1855,12 @@ cmd_update() {
     echo "  Restart to pick it up: $0 stop && $0 run"
     return 0
   fi
+
+  # Seed the node list here too, not just in install: existing boxes upgrade
+  # with 'update' and would otherwise never see the file. It announces itself
+  # when written, and 'status' shows the entry count, so the third-party
+  # default never arrives silently.
+  seed_nodes_list
 
   # Self-update the tool first; its re-exec lands back in this update.
   self_update "$@"

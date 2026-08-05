@@ -31,7 +31,103 @@ py_install() {
   pip install -q "$@" </dev/null
 }
 
-# 1. Custom-node requirements. Manager clones nodes into the mounted
+# 1. Manager config FIRST. It only writes user/__manager/config.ini, so it
+#    depends on nothing below it, and everything below depends on it: the
+#    node list needs network_mode to be a known value (not 'offline') and
+#    use_uv on, and letting cm-cli create a default config.ini that this
+#    step then rewrites would leave two sources of truth for the same file.
+#    It lives under the bind-mounted user dir, so it is asserted at run
+#    time, never baked into the image.
+log "Manager config"
+python /opt/spark/mods/30-manager-config/configure.py apply \
+  || warn "Manager config apply failed — continuing, Manager may be gated"
+
+# 2. Registry node list. custom_nodes is bind-mounted, so a node set cannot
+#    be baked into the image; reconciling it at start is the only place it
+#    can happen. Runs BEFORE the requirements and torch passes below on
+#    purpose: cm-cli installs node dependencies into the live venv, which is
+#    exactly what clobbers torch, so the guard has to stay downstream of it.
+#    Warn, never die, like the onnx guard: a registry outage or an offline
+#    box is a missing node, not a reason to refuse to serve.
+log "Registry node list"
+nodes_list=/opt/spark/comfyui-nodes.list
+if [[ ! -f "$nodes_list" ]]; then
+  info "no node list mounted — nothing to reconcile"
+else
+  node_entries=()
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" ]] && continue
+    # The entry becomes a cm-cli argument, quoted at the call site, so a
+    # metacharacter cannot execute. A junk line should still be named rather
+    # than handed to the installer to fail on obscurely.
+    if [[ ! "$line" =~ ^[A-Za-z0-9._/:@+-]+$ ]]; then
+      warn "ignoring malformed node-list entry: $line"
+      continue
+    fi
+    node_entries+=("$line")
+  done < "$nodes_list"
+
+  if (( ${#node_entries[@]} == 0 )); then
+    info "node list has no active entries"
+  else
+    # Directory an entry is expected to produce under custom_nodes: a bare or
+    # versioned id installs under the id, a URL under the repo basename.
+    node_dir_for() {
+      local e="$1"
+      case "$e" in
+        *://*|*.git) e="${e%.git}"; e="${e##*/}" ;;
+        *)           e="${e%%@*}" ;;
+      esac
+      printf '%s' "$e"
+    }
+
+    # Fast path. A bare registry id installs as a directory of the same name
+    # under custom_nodes, so an all-present list needs no cm-cli at all: no
+    # Manager import, no registry round trip, nothing on a steady-state
+    # start. Versioned (id@1.2.3) and URL entries always go to cm-cli, which
+    # is the only thing that can tell WHICH version is on disk. The
+    # name-equals-id assumption is a fast path, not a correctness gate: a
+    # wrong guess costs one call that prints "Already installed" anyway.
+    node_todo=()
+    for entry in "${node_entries[@]}"; do
+      if [[ "$entry" == *[@:/]* ]] || [[ ! -d "$INSTALL_DIR/custom_nodes/$entry" ]]; then
+        node_todo+=("$entry")
+      fi
+    done
+    if (( ${#node_todo[@]} == 0 )); then
+      info "${#node_entries[@]} listed node(s) already present — nothing to install"
+    else
+      info "reconciling ${#node_todo[@]} of ${#node_entries[@]} listed node(s) via cm-cli"
+      node_fail=0
+      for entry in "${node_todo[@]}"; do
+        # One call per entry so a failure names the node instead of hiding in
+        # a batch. COMFYUI_PATH is mandatory (cm-cli exits immediately
+        # without it); </dev/null keeps a prompting git clone from eating
+        # this loop's stdin; timeout keeps a hung registry off the launch path.
+        #
+        # --exit-on-fail is REQUIRED, not cosmetic: cm-cli's default is
+        # --no-exit-on-fail, under which a failed install prints a red ERROR
+        # and still exits 0 (field-verified 2026-08-05 with a nonexistent id).
+        # Even with it, a spec that resolves to nothing returns silently, so
+        # the exit code is necessary but not sufficient. Golden rule 3: the
+        # live check is whether the node is actually on disk afterwards.
+        if ! COMFYUI_PATH="$INSTALL_DIR" timeout 600 cm-cli install --exit-on-fail "$entry" </dev/null \
+           || [[ ! -d "$INSTALL_DIR/custom_nodes/$(node_dir_for "$entry")" ]]; then
+          warn "node '$entry' did not install — continuing without it"
+          node_fail=1
+        fi
+      done
+      if (( node_fail )); then
+        warn "one or more listed nodes are missing; the next start retries them"
+      fi
+    fi
+  fi
+fi
+
+# 3. Custom-node requirements. Manager clones nodes into the mounted
 #    custom_nodes dir, but their pip deps land in the container's writable
 #    layer and vanish on recreation, so a fresh container must install them.
 #    A RESTARTED container (service restart policy, reboots) still has
@@ -41,6 +137,12 @@ py_install() {
 #    (one resolver pass instead of one per node); a failure falls back to
 #    per-node installs to isolate the culprit. A failing node is a warning,
 #    not a dead server — same policy as restore.
+#
+#    This globs what is ON DISK, which is deliberately NOT the same set as
+#    comfyui-nodes.list: the list is additive (what must be installed), and
+#    a node stays after its line is removed, plus Manager-UI installs never
+#    appear in it at all. The count alone read as a contradiction in the
+#    field, so the nodes are named.
 log "Custom-node requirements"
 shopt -s nullglob
 req_files=("$INSTALL_DIR"/custom_nodes/*/requirements.txt)
@@ -53,9 +155,15 @@ elif [[ -f "$marker" ]] \
   info "requirements unchanged since this container's last start — skipping"
 else
   rm -f "$marker"
-  info "installing requirements for ${#req_files[@]} custom node(s) (via $INSTALLER)"
+  req_names=()
   pip_args=()
-  for req in "${req_files[@]}"; do pip_args+=(-r "$req"); done
+  for req in "${req_files[@]}"; do
+    req_names+=("$(basename "$(dirname "$req")")")
+    pip_args+=(-r "$req")
+  done
+  req_names_txt="$(printf '%s, ' "${req_names[@]}")"
+  info "installing requirements for ${#req_files[@]} custom node(s) (via $INSTALLER)"
+  info "  ${req_names_txt%, }"
   if py_install "${pip_args[@]}"; then
     sha256sum "${req_files[@]}" > "$marker"
   else
@@ -75,8 +183,9 @@ fi
 # shellcheck disable=SC1091
 source /opt/spark/mods/_lib/mod_common.sh
 
-# 2. Torch guard AFTER the node installs — that is exactly when torch gets
-#    clobbered. Same mod, same diag output as the native pre-launch pass.
+# 4. Torch guard AFTER every install above — the node list and the
+#    requirements pass are exactly what clobbers torch. Same mod, same diag
+#    output as the native pre-launch pass.
 log "Torch CUDA guard"
 (
   MOD_DIR=/opt/spark/mods/20-torch-repair
@@ -87,7 +196,7 @@ log "Torch CUDA guard"
 ) || die "torch CUDA check failed — see the diag lines above. If the wheel
 set itself is broken, rebuild the image: spark-comfyui.sh update"
 
-# 3. onnxruntime GPU guard, same placement logic as the torch guard: a custom
+# 5. onnxruntime GPU guard, same placement logic as the torch guard: a custom
 #    node that pip installs onnxruntime shadows the sm_121 GPU wheel through
 #    the shared import path, with no pip conflict to notice. DWPose and the
 #    ControlNet preprocessors then silently run on CPU. The healthy case is
@@ -103,7 +212,7 @@ ensure_onnx_gpu \
   || warn "onnxruntime GPU guard did not complete — DWPose and ControlNet
 preprocessors may fall back to CPU this session (spark-comfyui.sh doctor re-checks)"
 
-# 4. SageAttention live kernel gate. The image build compiled it blind (no
+# 6. SageAttention live kernel gate. The image build compiled it blind (no
 #    GPU exists at build time); this is where golden rule 3 now lives.
 log "SageAttention kernel gate"
 if sage_kernel_ok; then
@@ -114,13 +223,7 @@ else
 Rebuild the image: spark-comfyui.sh update"
 fi
 
-# 5. Manager config lives under the bind-mounted user/ dir, so it must be
-#    (re-)asserted at run time, not baked into the image.
-log "Manager config"
-python /opt/spark/mods/30-manager-config/configure.py apply \
-  || warn "Manager config apply failed — continuing, Manager may be gated"
-
-# 6. Launch. Flags mirror the native cmd_run; exposure is controlled by the
+# 7. Launch. Flags mirror the native cmd_run; exposure is controlled by the
 #    host's port mapping, so --listen 0.0.0.0 here is scoped to the
 #    container's own network namespace.
 extra_flags=()

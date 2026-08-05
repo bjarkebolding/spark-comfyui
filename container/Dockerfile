@@ -204,11 +204,15 @@ EXPOSE 8188
 # anything self-heal (restart policies ignore health by design) — it upgrades
 # "the process exists" into "the server answers", which is what 'status' and
 # 'doctor' report. /system_stats is a stock endpoint and needs no auth.
-# start-period is generous because the entrypoint installs custom-node
-# requirements and runs the GPU gates before main.py ever binds the port; a
-# large node set legitimately takes minutes, and health stays "starting"
-# (never "unhealthy") for that whole window.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --retries=3 \
+# start-period is generous because the entrypoint reconciles the registry
+# node list, installs custom-node requirements and runs the GPU gates before
+# main.py ever binds the port; a large node set legitimately takes minutes,
+# and health stays "starting" (never "unhealthy") for that whole window.
+# Raised 300s -> 600s when the node list landed: a COLD first start now
+# downloads and installs nodes too, and a slow link must not be reported as
+# a sick server. Nothing self-heals on health anyway, so the only cost of a
+# wider window is later detection of a genuine hang.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8188/system_stats', timeout=4)" || exit 1
 
 ENTRYPOINT ["/opt/spark/entrypoint.sh"]

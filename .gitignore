@@ -8,6 +8,10 @@ backups/
 # commented template automatically on first install)
 comfyui-patches.list
 
+# Personal Comfy Registry node list (the script seeds it on first install,
+# with one live entry; edited per box, so it is not tracked)
+comfyui-nodes.list
+
 # Container-only layout: all user content, and the personal mount
 # configuration (seeded as a commented template, like the patch list)
 data/

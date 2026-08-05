@@ -18,7 +18,7 @@ The whole GB10-tuned stack (cu130 PyTorch, native sm_121 SageAttention, GPU onnx
 
 ## Contents
 
-[Quick start](#quick-start) · [Commands](#commands) · [What it looks like](#what-it-looks-like) · [Mounts](#mounts) · [Patch list](#patch-list-optional) · [Troubleshooting](#troubleshooting) · [Security notes](#security-notes)
+[Quick start](#quick-start) · [Commands](#commands) · [What it looks like](#what-it-looks-like) · [Mounts](#mounts) · [Patch list](#patch-list-optional) · [Node list](#node-list) · [Troubleshooting](#troubleshooting) · [Security notes](#security-notes)
 
 ## Quick start
 
@@ -124,6 +124,35 @@ The flag works with every command and must name a file that exists, so a typo fa
 
 `comfyui-patches.list` next to the script merges upstream PRs or fork branches (`pr:12345`, `branch:name`, `remote:<url> <branch>`) on top of ComfyUI inside the image build. A conflict fails the build loudly. Empty list means plain master tracking.
 
+## Node list
+
+`comfyui-nodes.list` next to the script declares which [Comfy Registry](https://registry.comfy.org) nodes you want. The container installs them on every start, one per line, in order:
+
+```
+comfyui-workflow-models-downloader     # latest release
+some-node-id@1.2.3                     # pinned version
+some-node-id@nightly                   # git HEAD
+https://github.com/user/repo.git       # direct clone
+```
+
+It is the run-time counterpart to the patch list. Patches are a build input baked into the image; custom nodes live in the bind-mounted `custom_nodes` directory, so they can only be reconciled at launch. Manager's own `cm-cli` does the install, which is why every format it understands works here.
+
+Nodes already on disk are skipped without a network call, so a normal start costs nothing. A node that fails to install warns and the server still starts, and the next start retries it.
+
+**The list is additive, not authoritative.** It says what must be installed, never what your complete node set is. Removing a line stops future installs; it does not uninstall a node you already have, and nodes you install through the Manager UI never appear in it at all. So the two start-up lines below count different things, and they are meant to disagree:
+
+```
+==> Registry node list
+[info] 1 listed node(s) already present — nothing to install
+==> Custom-node requirements
+[info] installing requirements for 2 custom node(s) (via uv)
+[info]   comfyui-kjnodes, comfyui-workflow-models-downloader
+```
+
+The first is the list. The second is every node on disk that has a `requirements.txt`, whatever put it there. To actually remove a node, `./spark-comfyui.sh shell` then `COMFYUI_PATH=/opt/ComfyUI cm-cli uninstall <node-id>`.
+
+`install` and `update` both seed the file with one active entry, `comfyui-workflow-models-downloader`. Comment it out if you would rather start with nothing.
+
 ## Troubleshooting
 
 Start with `./spark-comfyui.sh doctor`; every failure names its fix. Common ones:
@@ -165,6 +194,7 @@ Start with `./spark-comfyui.sh doctor`; every failure names its fix. Common ones
 
 - Custom nodes run as a non-root user with all capabilities dropped and only your content directories and the GPU visible. A malicious node cannot read your SSH keys or anything else on the host.
 - The image is reproducible from this repo: pinned ComfyUI commit, sha256-pinned onnxruntime wheel, pinned SageAttention. `update --rollback` returns to the previous image atomically.
+- **`install` and `update` seed `comfyui-nodes.list` with one active entry**, so a fresh install, and an upgrade of an existing one, downloads and runs one third-party node from the Comfy Registry ([comfyui-workflow-models-downloader](https://registry.comfy.org/publishers/slahiri/nodes/comfyui-workflow-models-downloader)). Both print the file when they write it. Comment the line out before your next `run` if you want an install that executes no third-party node code. Everything the containment above says still applies to it.
 
 > [!WARNING]
 > Manager's `personal_cloud` mode is fine on a trusted LAN. Do not expose the port to the internet.
