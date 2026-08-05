@@ -137,7 +137,7 @@ https://github.com/user/repo.git       # direct clone
 
 It is the run-time counterpart to the patch list. Patches are a build input baked into the image; custom nodes live in the bind-mounted `custom_nodes` directory, so they can only be reconciled at launch. Manager's own `cm-cli` does the install, which is why every format it understands works here.
 
-Nodes already on disk are skipped without a network call, so a normal start costs nothing. A node that fails to install warns and the server still starts, and the next start retries it.
+Nodes already on disk are skipped without a network call, so a normal start costs nothing. A node that fails to install warns and the server still starts, and the next start retries it. Removing a line stops future installs; it does not uninstall a node you already have.
 
 `install` and `update` both seed the file with one active entry, `comfyui-workflow-models-downloader`. Comment it out if you would rather start with nothing.
 
