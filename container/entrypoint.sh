@@ -73,27 +73,58 @@ else
   if (( ${#node_entries[@]} == 0 )); then
     info "node list has no active entries"
   else
-    # Directory an entry is expected to produce under custom_nodes: a bare or
-    # versioned id installs under the id, a URL under the repo basename.
-    node_dir_for() {
-      local e="$1"
-      case "$e" in
-        *://*|*.git) e="${e%.git}"; e="${e##*/}" ;;
-        *)           e="${e%%@*}" ;;
+    # Is this entry satisfied on disk? The install directory is NOT
+    # predictable from the entry text. A bare or versioned id lands under the
+    # id (cnr_install joins custom_nodes with node_id), but a URL is resolved
+    # against the registry first: gitclone_install calls get_cnr_by_repo and
+    # delegates to install_by_id, so
+    # https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git installs
+    # into comfyui-videohelpersuite, NOT ComfyUI-VideoHelperSuite. Guessing
+    # the repo basename reported a healthy install as a failure on every
+    # start, which then triggered the cache refresh below every start too
+    # (field-verified 2026-08-05: a 2m18s penalty per launch, plus a warning
+    # about a node that was sitting right there).
+    #
+    # So match on what is actually there: the directory name, or the project
+    # name in the node's pyproject.toml. A CNR install arrives as a zip and
+    # has no .git to read a remote from, but it always carries a pyproject.
+    # Compared case-insensitively, which is what the id-vs-repo-name
+    # difference usually amounts to.
+    node_present() {
+      local want="$1" d base pname
+      case "$want" in
+        *://*|*.git) want="${want%.git}"; want="${want##*/}" ;;
+        *)           want="${want%%@*}" ;;
       esac
-      printf '%s' "$e"
+      for d in "$INSTALL_DIR"/custom_nodes/*/; do
+        [[ -d "$d" ]] || continue
+        d="${d%/}"; base="${d##*/}"
+        [[ "${base,,}" == "${want,,}" ]] && return 0
+        [[ -f "$d/pyproject.toml" ]] || continue
+        pname="$(sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*["'"'"']\([^"'"'"']*\)["'"'"'].*/\1/p' \
+                   "$d/pyproject.toml" | head -1)"
+        [[ -n "$pname" && "${pname,,}" == "${want,,}" ]] && return 0
+      done
+      return 1
     }
 
-    # Fast path. A bare registry id installs as a directory of the same name
-    # under custom_nodes, so an all-present list needs no cm-cli at all: no
-    # Manager import, no registry round trip, nothing on a steady-state
-    # start. Versioned (id@1.2.3) and URL entries always go to cm-cli, which
-    # is the only thing that can tell WHICH version is on disk. The
-    # name-equals-id assumption is a fast path, not a correctness gate: a
-    # wrong guess costs one call that prints "Already installed" anyway.
+    # How many node directories exist right now. A rise across an install is
+    # the last-resort proof that something landed, for the rare node whose
+    # registry id resembles neither its repo name nor its pyproject name.
+    node_dir_count() {
+      find "$INSTALL_DIR/custom_nodes" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l
+    }
+
+    # Fast path: an all-present list needs no cm-cli at all — no Manager
+    # import, no registry round trip, nothing on a steady-state start.
+    # VERSIONED entries (id@1.2.3, id@nightly) always go to cm-cli, which is
+    # the only thing that can tell WHICH version is on disk. Bare ids and
+    # URLs are satisfied by presence, which is also all cm-cli does with them
+    # (an already-installed node resolves to 'skip'), so a URL entry now
+    # short-circuits here instead of paying a round trip on every start.
     node_todo=()
     for entry in "${node_entries[@]}"; do
-      if [[ "$entry" == *[@:/]* ]] || [[ ! -d "$INSTALL_DIR/custom_nodes/$entry" ]]; then
+      if [[ "$entry" == *@* ]] || ! node_present "$entry"; then
         node_todo+=("$entry")
       fi
     done
@@ -106,15 +137,22 @@ else
       # it); </dev/null keeps a prompting git clone from eating the loop's
       # stdin; timeout keeps a hung registry off the launch path.
       #
-      # --exit-on-fail is REQUIRED, not cosmetic: cm-cli's default is
-      # --no-exit-on-fail, under which a failed install prints a red ERROR and
-      # still exits 0 (field-verified 2026-08-05 with a nonexistent id). Even
-      # with it, a spec that resolves to nothing returns silently, so the exit
-      # code is necessary but not sufficient. Golden rule 3: the live check is
-      # whether the node is actually on disk afterwards.
+      # The exit code is NOT a gate, because cm-cli does not have one.
+      # --exit-on-fail is still passed for the day upstream honours it, but it
+      # is a no-op in ComfyUI-Manager 4.2.2: the install command forwards
+      # exit_on_fail= through for_each_nodes, while install_node reads
+      # kwargs['raise_on_fail'], so nothing ever raises, nothing lands in
+      # for_each_nodes' failed[] list, and the command exits 0 for a
+      # nonexistent id AND for a bogus URL (both field-verified 2026-08-05).
+      # Golden rule 3, with no fallback available: the live check is whether
+      # the node is actually on disk afterwards.
       node_install_once() {
-        COMFYUI_PATH="$INSTALL_DIR" timeout 600 cm-cli install --exit-on-fail "$1" </dev/null \
-          && [[ -d "$INSTALL_DIR/custom_nodes/$(node_dir_for "$1")" ]]
+        local before after
+        before="$(node_dir_count)"
+        COMFYUI_PATH="$INSTALL_DIR" timeout 600 cm-cli install --exit-on-fail "$1" </dev/null || true
+        node_present "$1" && return 0
+        after="$(node_dir_count)"
+        (( after > before ))
       }
       node_fail=0
       cache_warmed=0
@@ -122,7 +160,7 @@ else
         node_install_once "$entry" && continue
         # A COLD box has no Manager registry cache, and the catalogue bundled
         # in the pip package does not carry every registry node. Field-hit
-        # 2026-08-06 after a data/ wipe: the bundled list holds 3587 entries
+        # 2026-08-05 after a data/ wipe: the bundled list holds 3587 entries
         # and zero matches for a node that installs fine once the cache is
         # warm, so the first start after a wipe silently got no nodes.
         # Refresh once per start, then retry. Reactive rather than always-on,
@@ -132,7 +170,7 @@ else
           cache_warmed=1
           # Heartbeat, not silence. The fetch takes a few minutes on a cold
           # box and this is the launch path, so a run with no output for that
-          # long is indistinguishable from a hang (field-hit 2026-08-06: it
+          # long is indistinguishable from a hang (field-hit 2026-08-05: it
           # was reported as stuck while working normally). A \r spinner is
           # wrong here: 'run' is docker run WITHOUT -t, so stdout is a pipe
           # and only newline-terminated lines render sanely in the log.
