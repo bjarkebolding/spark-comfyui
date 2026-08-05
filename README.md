@@ -139,18 +139,6 @@ It is the run-time counterpart to the patch list. Patches are a build input bake
 
 Nodes already on disk are skipped without a network call, so a normal start costs nothing. A node that fails to install warns and the server still starts, and the next start retries it.
 
-**The list is additive, not authoritative.** It says what must be installed, never what your complete node set is. Removing a line stops future installs; it does not uninstall a node you already have, and nodes you install through the Manager UI never appear in it at all. So the two start-up lines below count different things, and they are meant to disagree:
-
-```
-==> Registry node list
-[info] 1 listed node(s) already present — nothing to install
-==> Custom-node requirements
-[info] installing requirements for 2 custom node(s) (via uv)
-[info]   comfyui-kjnodes, comfyui-workflow-models-downloader
-```
-
-The first is the list. The second is every node on disk that has a `requirements.txt`, whatever put it there. To actually remove a node, `./spark-comfyui.sh shell` then `COMFYUI_PATH=/opt/ComfyUI cm-cli uninstall <node-id>`.
-
 `install` and `update` both seed the file with one active entry, `comfyui-workflow-models-downloader`. Comment it out if you would rather start with nothing.
 
 ## Troubleshooting
