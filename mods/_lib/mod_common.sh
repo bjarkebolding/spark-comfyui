@@ -173,18 +173,15 @@ PY
 # shadowed install pays the reinstall. The caller treats a failure as a warn,
 # never a die: CPU onnxruntime is a slowdown, not a broken server.
 ensure_onnx_gpu() {
-  ORT_STATE="unknown"
   local pyver
   pyver="$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
   if [[ "$pyver" != "312" ]]; then
     warn "GPU onnxruntime wheel is cp312; this venv is Python ${pyver:0:1}.${pyver:1}.
 Skipping — preprocessor nodes (DWPose etc.) will use CPU onnxruntime."
-    ORT_STATE="skipped (non-3.12 venv)"
     return 0
   fi
   if onnx_gpu_ok; then
     echo "onnxruntime: OK — GPU provider live"
-    ORT_STATE="GPU provider live"
     return 0
   fi
   log "Installing sm_121 GPU onnxruntime (community wheel)"
@@ -193,13 +190,10 @@ Skipping — preprocessor nodes (DWPose etc.) will use CPU onnxruntime."
   pip install "$ORT_WHEEL_URL"
   if onnx_gpu_ok; then
     echo "onnxruntime CUDAExecutionProvider: live (preprocessors on GPU)"
-    ORT_STATE="GPU provider live (installed)"
   else
     warn "onnxruntime installed but CUDA provider is NOT available — DWPose
 etc. will fall back to CPU. Ensure cuDNN 9.x is installed system-wide
 (DGX OS ships it; otherwise: sudo apt-get install -y libcudnn9-cuda-13)."
-    # shellcheck disable=SC2034  # status for a caller; see the wiring note above
-    ORT_STATE="CPU FALLBACK — see warning"
   fi
 }
 

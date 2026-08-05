@@ -22,11 +22,23 @@ editing `container/entrypoint.sh`.
 mods/
   _lib/mod_common.sh        # shared helpers (not a mod; the leading _ skips it)
   05-setuptools-compat/
-    run.sh                  # the contract (required)
+    run.sh                  # the contract, for mods a contract runner invokes
   10-unified-memory-free/
     run.sh
     transform.py            # supporting file(s) (optional)
+  30-manager-config/
+    configure.py            # no run.sh: the entrypoint calls this directly
 ```
+
+`run.sh` is required only for mods a contract runner invokes, which today
+means `container/build-mods.sh` (05, 10) and the entrypoint's `mod_prerun`
+call (20). `30-manager-config` is not one: the entrypoint runs
+`configure.py apply` directly, because the config it writes lives under the
+bind-mounted user directory and has to be re-asserted at run time. It carried
+a `run.sh` until 2026-08-05 purely because the deleted native host-side pass
+globbed every mod and called `mod_apply` on all of them. Same story as mods
+40 and 50 (see CLAUDE.md): native-era orchestration, retired once the
+container did the job.
 
 ## The contract
 
