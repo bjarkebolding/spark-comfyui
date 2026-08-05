@@ -9,5 +9,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: >
-          shellcheck -S warning spark-comfyui.sh mods/*/run.sh
+          shellcheck -S warning spark-comfyui.sh lib/*.sh mods/*/run.sh
           mods/_lib/mod_common.sh container/*.sh

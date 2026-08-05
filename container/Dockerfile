@@ -157,7 +157,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 #                              these any node importing cv2 dies with
 #                              "libGL.so.1: cannot open shared object file"
 #                              and ComfyUI carries on without it (field-hit
-#                              2026-08-06 with comfyui-videohelpersuite).
+#                              2026-08-05 with comfyui-videohelpersuite).
 #                              Exactly these two packages: they cover the
 #                              three libraries ldd actually reported missing,
 #                              and nothing else was.

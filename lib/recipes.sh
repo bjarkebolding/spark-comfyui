@@ -112,7 +112,7 @@ _recipe_fetch() {
   # the only way to show the whole job as well as the current file.
   local -a progress=(-q)
 
-  # wget, not curl, and specifically for -c. Measured 2026-08-06 against a
+  # wget, not curl, and specifically for -c. Measured 2026-08-05 against a
   # server that drops mid-transfer: wget re-evaluates the continue offset on
   # every try, so --tries resumes (Range went 0, 4000000, 8000000, 12000000
   # in one invocation). curl does NOT: --retry ignores a dropped connection
