@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.08.05.1 | License: MIT
+#  Version 2026.08.06 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -58,6 +58,16 @@
 #                              unified-memory freezes), persistence mode,
 #                              optional clock cap (~2100 fixes overcurrent
 #                              hard-reboots). --persist survives reboots.
+#    recipe list|show|check|install|capture
+#                              Everything a workflow needs, as data: the
+#                              workflow, its custom nodes, and every model
+#                              with a destination, size and sha256.
+#                              'install' downloads what is missing (resumable,
+#                              hash-verified), merges the nodes into
+#                              comfyui-nodes.list and drops the workflow in.
+#                              'capture' authors one from a workflow that
+#                              already runs here. Recipes live in recipes/
+#                              and are tracked, so a recipe is shareable.
 #    backup [--with-output] [FILE]
 #                              Archive the small precious state: workflows,
 #                              settings, inputs, patch and node lists,
@@ -116,7 +126,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.08.05.1"
+VERSION="2026.08.06"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -166,6 +176,11 @@ PATCH_LIST="${PATCH_LIST:-$BASE_DIR/comfyui-patches.list}"
 #   https://github.com/u/repo.git      # direct clone
 # Lines starting with # and blank lines are ignored.
 NODES_LIST="${NODES_LIST:-$BASE_DIR/comfyui-nodes.list}"
+
+# Recipes: everything a workflow needs to run, as data. Unlike the two lists
+# above these are TRACKED in the repo, because a recipe is meant to be shared:
+# it is the executable form of "here is how I got this workflow working".
+RECIPES_DIR="${RECIPES_DIR:-$BASE_DIR/recipes}"
 
 # GB10 mods live in mods/<name>/run.sh and are applied through a small
 # contract (see mods/README.md). They run inside the image: build-time ones
@@ -2135,6 +2150,29 @@ EOS
   fi
 }
 
+# -------------------------------- Libraries ---------------------------------
+# Code that only POPULATES an install, as opposed to operating it. Everything
+# operational (the docker lifecycle, doctor, status/watch, tune,
+# backup/restore) stays in this file however big it gets, because it touches
+# the image, the container or the host. lib/recipes.sh touches none of the
+# three.
+#
+# Everything under lib/ is internal: sourced or called by this script, never
+# by a person. The user-facing surface is exactly one executable file, this
+# one, and 'recipe' is a subcommand of it like every other command.
+#
+# Sourced, never executed: lib/recipes.sh defines functions and has no
+# dispatch of its own, so it needs no execute bit — one less mode to lose in
+# transit than container/entrypoint.sh had. Relocatable like everything else,
+# from BASE_DIR (golden rule 2). A missing file dies loudly rather than
+# silently leaving a command undefined (golden rule 5).
+LIB_DIR="${LIB_DIR:-$BASE_DIR/lib}"
+[[ -r "$LIB_DIR/recipes.sh" ]] \
+  || die "missing $LIB_DIR/recipes.sh
+lib/, mods/ and container/ must sit next to the script — re-clone or re-pull."
+# shellcheck disable=SC1091
+source "$LIB_DIR/recipes.sh"
+
 # ------------------------------- Dispatch -----------------------------------
 # Sourced rather than executed (test harnesses source this file for its
 # function definitions): stop here, never dispatch.
@@ -2194,6 +2232,7 @@ case "$CMD" in
   restore)  cmd_restore "$@" ;;
   prune)    cmd_prune "$@" ;;
   reset)    cmd_reset "$@" ;;
+  recipe)   cmd_recipe "$@" ;;
   shell)    cmd_shell ;;
   # --- hidden backward-compat aliases (old command spellings still work) ---
   verify)   cmd_doctor ;;

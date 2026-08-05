@@ -18,7 +18,7 @@ The whole GB10-tuned stack (cu130 PyTorch, native sm_121 SageAttention, GPU onnx
 
 ## Contents
 
-[Quick start](#quick-start) · [Commands](#commands) · [What it looks like](#what-it-looks-like) · [Mounts](#mounts) · [Patch list](#patch-list-optional) · [Node list](#node-list) · [Troubleshooting](#troubleshooting) · [Security notes](#security-notes)
+[Quick start](#quick-start) · [Commands](#commands) · [What it looks like](#what-it-looks-like) · [Mounts](#mounts) · [Patch list](#patch-list-optional) · [Node list](#node-list) · [Recipes](#recipes) · [Troubleshooting](#troubleshooting) · [Security notes](#security-notes)
 
 ## Quick start
 
@@ -50,6 +50,7 @@ Models go in `data/models/checkpoints` (etc.). No venv, no system Python changes
 | `restore FILE` | Rebuilds from a backup: image if missing, content into `data/`, custom nodes re-cloned at pinned commits, missing models listed with sizes. |
 | `prune [--yes]` | Reclaims disk: drops leftover image tags and trims the BuildKit cache to its age and size limits. Keeps `:latest`, `:previous` and every `keep-*` pin, and never rebuilds. Shows what goes before it goes. |
 | `reset [--yes]` | Removes the container, all image tags and the cache volume; rebuilds from scratch. `data/` is never touched. Unlike `prune`, this does drop `keep-*` pins. |
+| `recipe list\|show\|check\|install\|capture` | Everything a workflow needs, as data: the workflow, its custom nodes, and every model with a destination, size and sha256. `install` downloads what is missing (resumable, hash-verified) and wires up the rest. `capture` authors one from a workflow that already runs here. |
 | `shell` | Opens a bash shell inside the running container. For inspecting the venv or a custom node. The image is immutable, so nothing you change there survives a restart. |
 
 Disk knobs, applied by `update` and `prune`: `CACHE_KEEP_DAYS` (default 7) drops build cache untouched for that long, `CACHE_MAX_GB` (default 40) caps its total size. Either at `0` disables that pass. The cap is the one that matters if you rebuild often, because the age filter measures last use and a frequent rebuild keeps every layer fresh.
@@ -140,6 +141,42 @@ It is the run-time counterpart to the patch list. Patches are a build input bake
 Nodes already on disk are skipped without a network call, so a normal start costs nothing. A node that fails to install warns and the server still starts, and the next start retries it. Removing a line stops future installs; it does not uninstall a node you already have.
 
 `install` and `update` both seed the file with one active entry, `comfyui-workflow-models-downloader`. Comment it out if you would rather start with nothing.
+
+## Recipes
+
+A workflow file does not say what it needs. It names models by bare filename, with no path, no URL and no hash, and the destination folder is only implied by the loader node, which breaks entirely for subgraphs. A recipe says all of it.
+
+```bash
+./spark-comfyui.sh recipe list                  # what is available
+./spark-comfyui.sh recipe check minimax-h3-i2v  # what is missing, downloads nothing
+./spark-comfyui.sh recipe install minimax-h3-i2v
+```
+
+```console
+$ ./spark-comfyui.sh recipe check minimax-h3-i2v
+
+== minimax-h3-i2v ==
+  [have] diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors
+  [have] text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+  [want] vae/minimax_h3_video_vae_fp16.safetensors (4.9G)
+  [want] vae/minimax_h3_audio_vae_fp32.safetensors (578M)
+
+  models: 2 of 4 present, 2 to download (5.4G)
+```
+
+`install` downloads what is missing, merges the recipe's custom nodes into `comfyui-nodes.list`, and drops the workflow into your workflows directory. Downloads resume, every model is checked against its sha256, and a file only moves into `models/` after it verifies, so a partial download can never look installed. A model already on disk that disagrees with the recipe is reported and **left alone**; `--force` re-downloads it.
+
+Each recipe is a single self-contained `recipes/<name>.json` with the workflow embedded, so you can paste one into a gist or an issue and someone else can install from it. They are tracked in this repo, which makes a recipe the executable form of a forum post. Gated downloads read `HF_TOKEN` and `CIVITAI_TOKEN` from the environment; a token never belongs in a recipe.
+
+To author one from a workflow that already runs on your box, name the workflow as you saved it:
+
+```bash
+./spark-comfyui.sh recipe capture video_minimax_h3_t2v
+```
+
+A path to a `.json` file works too, and `--name` overrides the recipe name, which otherwise matches the workflow.
+
+It finds each model under `models/`, records the destination, size and sha256, and fills in the URLs. Those come from recipes you already have, matched on sha256 so a URL is only reused for provably identical bytes, and failing that from ComfyUI-Manager's model list. Anything still blank you fill in yourself; a recipe with a blank URL refuses to install. For a HuggingFace file the hash to match is `lfs.sha256` from `https://huggingface.co/api/models/<repo>?blobs=true`.
 
 ## Troubleshooting
 
