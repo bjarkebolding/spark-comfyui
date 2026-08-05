@@ -115,7 +115,14 @@ RUN --mount=type=cache,target=/home/comfy/.cache/pip,uid=1000 \
 # no GPU and no user content. 20/40/50 are verified by the entrypoint; 30
 # writes to the mounted user dir and also runs there.
 COPY --chown=comfy:comfy mods/ /opt/spark/mods/
-COPY --chown=comfy:comfy container/build-mods.sh container/entrypoint.sh /opt/spark/
+# --chmod=755 is load-bearing, not tidiness. COPY reproduces the build-context
+# mode verbatim and the runtime stage carries it through, so a tree that
+# arrived without the execute bit (a downloaded zip, a copy that dropped
+# modes) baked a non-executable entrypoint into an image that still built
+# with exit 0. The failure then surfaced at run time as an OCI "permission
+# denied" naming only a path inside the container. Field-reported 2026-08-05.
+# The image must not inherit that bit from the user's disk.
+COPY --chown=comfy:comfy --chmod=755 container/build-mods.sh container/entrypoint.sh /opt/spark/
 ENV INSTALL_DIR=/opt/ComfyUI
 ENV VENV_DIR=/opt/comfyui-env
 RUN bash /opt/spark/build-mods.sh

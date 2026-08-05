@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.08.03.1 | License: MIT
+#  Version 2026.08.05 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -114,7 +114,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.08.03.1"
+VERSION="2026.08.05"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -2027,6 +2027,14 @@ bad()  { printf '  \033[1;31m[FAIL]\033[0m %s\n' "$*"; fails=$((fails+1)); }
 log()  { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 fails=0
 source /opt/spark/mods/_lib/mod_common.sh
+
+log "entrypoint"
+# doctor runs with --entrypoint bash, so it overrides the image's own
+# ENTRYPOINT and would pass every gate on an image that cannot start at all.
+# A non-executable entrypoint used to reach users that way (see the Dockerfile
+# --chmod note); check it explicitly from inside the container we already have.
+if [[ -x /opt/spark/entrypoint.sh ]]; then ok "/opt/spark/entrypoint.sh is executable"
+else bad "/opt/spark/entrypoint.sh is not executable — the container cannot start; rebuild the image (spark-comfyui.sh update)"; fi
 
 log "torch / CUDA"
 if python - <<'PY'
