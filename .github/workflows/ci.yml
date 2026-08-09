@@ -1,0 +1,41 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: >
+          shellcheck -S warning spark-comfyui.sh lib/*.sh mods/*/run.sh
+          mods/_lib/mod_common.sh container/*.sh
+
+  python:
+    # The shell half has been gated since day one; the Python half was not,
+    # even though lib/recipe_read.py is the traversal boundary for the recipe
+    # feature and "somewhere it can be linted and tested" was the stated
+    # reason for moving Python out of heredocs. This closes that.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: byte-compile every tracked python file
+        # container/ is in the list because manager-config.py lives there since
+        # 2026-08-08. A moved file silently leaving CI's coverage is its own
+        # small failure mode; keep this list matching where .py actually is.
+        run: python3 -m compileall -q lib mods container
+      - name: every tracked recipe must pass validation
+        # recipe_read.py is what decides whether a recipe may write outside
+        # models/. Running it over recipes/ means a recipe that fails its own
+        # validation can never reach main, and it exercises the validator on
+        # real input rather than a fixture.
+        run: |
+          shopt -s nullglob
+          found=0
+          for r in recipes/*.json; do
+            found=1
+            echo "validating $r"
+            python3 lib/recipe_read.py "$r" > /dev/null
+          done
+          [ "$found" = 1 ] || { echo "no recipes to validate"; exit 1; }

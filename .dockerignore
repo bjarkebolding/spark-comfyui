@@ -1,0 +1,14 @@
+# The build context is BASE_DIR, which on a live install also holds the
+# ComfyUI checkout, the venv, SageAttention and backups (100+ GB). Whitelist
+# only what the image build needs.
+#
+# spark-comfyui.sh itself was whitelisted here until 2026-08-08. No stage ever
+# COPYs it (the image runs container/entrypoint.sh, not the host tool), so all
+# it did was put a file in the context that nothing read. lib/ is excluded for
+# the same reason and never needed an entry: the whitelist is a default-deny.
+*
+!mods
+!mods/**
+!container
+!container/**
+!comfyui-patches.list
