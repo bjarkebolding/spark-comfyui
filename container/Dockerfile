@@ -30,11 +30,17 @@ ARG SAGE_REPO=https://github.com/thu-ml/SageAttention.git
 ARG SAGE_REF=d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5
 ARG ORT_WHEEL_URL=https://huggingface.co/Jay0515/onnxruntime-gpu-aarch64-cuda13-sm121/resolve/main/onnxruntime_gpu-1.25.0-cp312-cp312-linux_aarch64.whl#sha256=da487cc1ccd3aa11389efec14c6f0f8b6bd7ca6734423de3b528e578023cb200
 ARG TORCH_CUDA_ARCH_LIST=12.1+PTX
-ARG UID=1000
+# There is deliberately NO UID build arg, and adding one is a regression.
+# The image bakes no host identity: it is built as uid 1000 internally and
+# RUN AS THE CALLER at launch (--user in _container_run_args), with /opt and
+# /home/comfy group-0 writable so any uid can write the venv and the ComfyUI
+# tree. Baking the host's uid would put one identity in two places, the image
+# and the host directories, and every drift between them is a permission
+# failure. Field-reported 2026-08-23 by a GX10 user whose account was uid 1001
+# because a second cluster user had taken 1000.
 
 # --------------------------------------------------------------------------
 FROM ${CUDA_IMAGE} AS base
-ARG UID
 ENV DEBIAN_FRONTEND=noninteractive
 # The X client libs are for ComfyUI's stock GLSL nodes (comfy_extras/
 # nodes_glsl.py): the bundled ANGLE libGLESv2 links libX11/libXext/libxcb
@@ -45,10 +51,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libx11-6 libxext6 libxcb1 \
     && rm -rf /var/lib/apt/lists/*
 
-# ubuntu24.04 ships an 'ubuntu' user on uid 1000; replace it with comfy so
-# files written to the bind-mounted user content keep the host owner's uid.
+# ubuntu24.04 ships an 'ubuntu' user on uid 1000; replace it with comfy. The
+# BUILD always runs as uid 1000, which is why the BuildKit cache mounts below
+# can name it literally. The shipped image does not depend on that number: see
+# the group-0 pass at the end of the final stage.
 RUN userdel -r ubuntu 2>/dev/null || true \
- && useradd -m -u ${UID} comfy \
+ && useradd -m -u 1000 comfy \
  && mkdir -p /opt/spark && chown -R comfy:comfy /opt
 
 USER comfy
@@ -147,6 +155,25 @@ ENV INSTALL_DIR=/opt/ComfyUI
 ENV VENV_DIR=/opt/comfyui-env
 RUN bash /opt/spark/build-mods.sh
 
+# Group 0 rights over everything the runtime stage carries. The container runs
+# as the CALLER's uid, which is unknown at build time, so an arbitrary uid must
+# still be able to write the venv (the entrypoint pip-installs custom-node
+# requirements on EVERY start) and the ComfyUI tree (__pycache__, temp/).
+# Group 0 is the one group every container process is given, via --group-add 0.
+# g=u grants the group exactly the owner's rights; g+s on directories makes
+# files created later inherit group 0 rather than the caller's primary group.
+#
+# This MUST live here and not in the runtime stage. A recursive chmod there
+# would rewrite every file of a 6.2 GB venv into a fresh layer and roughly
+# double the shipped image. Here it costs a build-stage layer that is never
+# shipped, because runtime is a fresh FROM ubuntu:24.04 that COPYs from this
+# stage, and a COPY writes new files at the mode of the source.
+USER root
+RUN chgrp -R 0 /opt \
+ && chmod -R g=u /opt \
+ && find /opt -type d -exec chmod g+s {} +
+USER comfy
+
 # --------------------------------------------------------------------------
 # Slim runtime stage (phase 4). Everything above runs in the devel context;
 # the shipped image is this one: plain ubuntu + the venv + ComfyUI + the
@@ -160,7 +187,6 @@ RUN bash /opt/spark/build-mods.sh
 # The SageAttention build tree is NOT copied (246 MB of build residue; the
 # compiled package lives in the venv).
 FROM ubuntu:24.04 AS runtime
-ARG UID
 ARG COMFY_SHA
 ARG SAGE_REF
 ARG TORCH_INDEX
@@ -191,20 +217,45 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libx11-6 libxext6 libxcb1 \
       libgl1 libglib2.0-0t64 \
     && rm -rf /var/lib/apt/lists/*
+# /etc/passwd is left group writable so the entrypoint can add an entry for
+# whatever uid it is running as. Without one, getpwuid() raises and anything
+# resolving the current user breaks. It grants nothing: the process is already
+# non-root, the container drops ALL capabilities and sets no-new-privileges,
+# and there is no setuid binary for a forged entry to reach.
 RUN userdel -r ubuntu 2>/dev/null || true \
- && useradd -m -u ${UID} comfy \
- && mkdir -p /opt && chown comfy:comfy /opt
+ && useradd -m -u 1000 comfy \
+ && mkdir -p /opt && chown comfy:0 /opt && chmod g=u /opt \
+ && chmod g+w /etc/passwd
 
-COPY --from=final --chown=comfy:comfy /opt/comfyui-env /opt/comfyui-env
-COPY --from=final --chown=comfy:comfy /opt/ComfyUI /opt/ComfyUI
-COPY --from=final --chown=comfy:comfy /opt/spark /opt/spark
+COPY --from=final --chown=comfy:0 /opt/comfyui-env /opt/comfyui-env
+COPY --from=final --chown=comfy:0 /opt/ComfyUI /opt/ComfyUI
+COPY --from=final --chown=comfy:0 /opt/spark /opt/spark
 COPY --from=base /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
 
-USER comfy
+# COPY creates the DESTINATION DIRECTORY itself at a default 0755 and ignores
+# the source directory's mode, so the three roots above land without the group
+# rights the final stage set, while everything inside them keeps them. Caught
+# by the arbitrary-uid test 2026-08-23: files were 664 group root, but the tree
+# roots were 755, so an arbitrary uid could not create anything in them.
+# Three directories, so this is not the recursive chmod the final stage exists
+# to avoid; it adds a layer of three inodes.
+RUN chmod g+ws /opt/comfyui-env /opt/ComfyUI /opt/spark
+
 # The cache volume mounts at /home/comfy/.cache; the dir must exist in the
 # image OWNED BY comfy, or docker creates the mountpoint (and initializes a
-# fresh named volume) as root and pip/uv/CUDA all fail to write.
-RUN mkdir -p /home/comfy/.cache/pip /home/comfy/.cache/uv /home/comfy/.cache/nv-compute
+# fresh named volume) as root and pip/uv/CUDA all fail to write. Group 0 is
+# what makes it survive a change of caller: docker copies ownership from this
+# mountpoint the first time it populates the volume and never revisits it, so
+# a uid-specific owner here would strand the cache for every other user.
+RUN mkdir -p /home/comfy/.cache/pip /home/comfy/.cache/uv /home/comfy/.cache/nv-compute \
+ && chown -R comfy:0 /home/comfy \
+ && chmod -R g=u /home/comfy \
+ && find /home/comfy -type d -exec chmod g+s {} +
+
+# The fallback identity, for anything that runs this image without --user:
+# doctor's throwaway gate containers do exactly that. The launch path overrides
+# it with the caller's uid.
+USER comfy
 
 # Runtime environment, mirroring the native-era cmd_run: 4 GB CUDA kernel
 # cache (redirected into the cache volume so compiled sm_121 kernels
@@ -215,7 +266,10 @@ RUN mkdir -p /home/comfy/.cache/pip /home/comfy/.cache/uv /home/comfy/.cache/nv-
 # exactly like pip's downloads do. UV_LINK_MODE=copy because the cache volume
 # and the venv are different filesystems: uv would try to hardlink, fail, warn,
 # and fall back to copying anyway on every single install.
-ENV VIRTUAL_ENV=/opt/comfyui-env \
+ENV HOME=/home/comfy \
+    USER=comfy \
+    LOGNAME=comfy \
+    VIRTUAL_ENV=/opt/comfyui-env \
     PATH=/opt/comfyui-env/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     INSTALL_DIR=/opt/ComfyUI \
     VENV_DIR=/opt/comfyui-env \

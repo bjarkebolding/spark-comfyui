@@ -14,6 +14,23 @@ warn() { printf '\033[1;33m[warn] %s\033[0m\n' "$*"; }
 info() { printf '\033[1;36m[info] %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31m[error] %s\033[0m\n' "$*" >&2; exit 1; }
 
+# The container runs as the CALLER's uid (--user, set by _container_run_args),
+# so there is normally no passwd entry for it. getpwuid() then raises and
+# anything resolving the current user breaks. HOME, USER and LOGNAME come from
+# the image ENV; this supplies the passwd line itself. /etc/passwd is group
+# writable in the image for exactly this. A failure here is not fatal: the env
+# vars already cover the common callers, so warn and carry on.
+if ! getent passwd "$(id -u)" >/dev/null 2>&1; then
+  printf 'comfy:x:%s:%s:comfy:%s:/bin/bash\n' \
+    "$(id -u)" "$(id -g)" "${HOME:-/home/comfy}" >> /etc/passwd 2>/dev/null \
+    || warn "no passwd entry for uid $(id -u) and /etc/passwd is not writable"
+fi
+
+# Everything this process writes into the group-0 image trees has to stay group
+# writable, or the next caller running as a different uid could not overwrite
+# it. Only affects the image trees; bind-mounted content is owned by the caller.
+umask 002
+
 : "${INSTALL_DIR:?}" "${VENV_DIR:?}"
 cd "$INSTALL_DIR"
 

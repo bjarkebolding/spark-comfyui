@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.08.09 | License: MIT
+#  Version 2026.08.23 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -126,7 +126,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.08.09"
+VERSION="2026.08.23"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -1600,8 +1600,23 @@ _container_run_args() {
   # docker's own error is fine but arrives further into the launch.
   [[ "$SHM_SIZE" =~ ^[0-9]+[bkmgBKMG]?$ ]] \
     || die "SHM_SIZE must be a docker size like 16g, 512m or a byte count (got: $SHM_SIZE)"
+  # The container runs as the CALLER, every launch. This is the whole of the
+  # uid story: the image bakes no identity (see the Dockerfile header), and the
+  # bind-mounted content is owned by whoever ran this script, because the host
+  # shell is what created it below. One source of truth, so the two can never
+  # disagree. The image trees are group-0 writable, which is what lets an
+  # arbitrary uid write the venv, so --group-add 0 is not optional.
+  #
+  # Before 2026-08-23 the image baked uid 1000 and the tool passed no --user,
+  # so every box whose user was not uid 1000 failed with permission errors on
+  # its own content (field-reported on a GX10 whose owner was uid 1001).
+  [[ "$(id -u)" != "0" ]] \
+    || die "run this as your normal user, not as root — the container runs as
+the calling uid, and root would write root-owned files into your content"
   CRUN_ARGS=(
     --name "$CONTAINER_NAME"
+    --user "$(id -u):$(id -g)"
+    --group-add 0
     --gpus all
     --shm-size "$SHM_SIZE"
     --cap-drop ALL
@@ -1620,21 +1635,31 @@ _container_run_args() {
   # the entrypoint says so and moves on.
   [[ -f "$NODES_LIST" ]] \
     && CRUN_ARGS+=(-v "$NODES_LIST:/opt/spark/comfyui-nodes.list:ro")
-  local entry host i
+  _content_mount_args
+  CRUN_ARGS+=("${CMOUNT_ARGS[@]}")
+}
+
+# The content mounts on their own, as docker -v flags in CMOUNT_ARGS: the
+# resolved USER_CONTENT set plus any extra mounts, and nothing else. Split out
+# of _container_run_args so doctor can mount exactly what a launch mounts
+# without also taking the container name, the port binding and the GPU.
+# Requires resolve_mounts to have run.
+_content_mount_args() {
+  CMOUNT_ARGS=()
+  local entry host i m
   for i in "${!RESOLVED_ENTRIES[@]}"; do
     entry="${RESOLVED_ENTRIES[$i]}" host="${RESOLVED_PATHS[$i]}"
     if [[ "$entry" == *.yaml ]]; then
-      [[ -f "$host" ]] && CRUN_ARGS+=(-v "$host:/opt/ComfyUI/$entry:ro")
+      [[ -f "$host" ]] && CMOUNT_ARGS+=(-v "$host:/opt/ComfyUI/$entry:ro")
     else
       mkdir -p "$host" 2>/dev/null \
         || die "cannot create the '$entry' mount path: $host
 (permission denied, or a parent that is not writable) — check $MOUNTS_CONF"
-      CRUN_ARGS+=(-v "$host:/opt/ComfyUI/$entry")
+      CMOUNT_ARGS+=(-v "$host:/opt/ComfyUI/$entry")
     fi
   done
-  local m
   for m in "${EXTRA_MOUNTS[@]}"; do
-    CRUN_ARGS+=(-v "$m")
+    CMOUNT_ARGS+=(-v "$m")
   done
 }
 
@@ -2126,6 +2151,59 @@ cmd_doctor() {
       || info "no cache volume yet (created on first run)"
   else
     bad "image $CONTAINER_IMAGE:latest missing — run: $0 install"
+  fi
+
+  # The container runs as the caller and the content is the caller's, so this
+  # passes by construction. What it catches is the one case the design cannot
+  # prevent: content owned by somebody else. That is a shared export, or files
+  # an image from before 2026-08-23 wrote as uid 1000 on a host whose user is
+  # not 1000. A real write through the real mounts, never a uid comparison
+  # (golden rule 3), because only a write knows about ACLs, read-only exports
+  # and full filesystems.
+  hdr "content mounts"
+  if docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1; then
+    resolve_mounts
+    _content_mount_args
+    local probe_out probe_rc=0 me
+    me="$(id -u):$(id -g)"
+    probe_out="$(docker run --rm --user "$me" --group-add 0 \
+      "${CMOUNT_ARGS[@]}" --entrypoint bash "$CONTAINER_IMAGE:latest" -c '
+        rc=0
+        for e in "$@"; do
+          d="/opt/ComfyUI/$e"
+          [[ -d "$d" ]] || continue
+          if (umask 002; : > "$d/.spark-probe") 2>/dev/null; then
+            rm -f "$d/.spark-probe"
+          else
+            printf "%s %s\n" "$e" "$(stat -c %u:%g "$d")"
+            rc=1
+          fi
+        done
+        exit $rc' _ "${RESOLVED_ENTRIES[@]}" 2>/dev/null)" || probe_rc=$?
+    if (( probe_rc == 0 )); then
+      ok "every mounted content dir is writable as $me"
+    else
+      local pe powner
+      while read -r pe powner; do
+        [[ -n "$pe" ]] || continue
+        bad "content dir '$pe' is not writable: it is owned by $powner and you are $me
+  fix it with: sudo chown -R $me $(_mount_path "$pe" || echo "$DATA_DIR/$pe")"
+      done <<< "$probe_out"
+    fi
+    # Writable dir, foreign files inside: the exact residue of a pre-2026.08.23
+    # image on a non-1000 host, and invisible to the write test above.
+    local ce ch cforeign
+    for ce in "${RESOLVED_ENTRIES[@]}"; do
+      [[ "$ce" == *.yaml ]] && continue
+      ch="$(_mount_path "$ce")"
+      [[ -d "$ch" ]] || continue
+      cforeign="$(find "$ch" ! -uid "$(id -u)" -printf '%U' -quit 2>/dev/null || true)"
+      [[ -n "$cforeign" ]] \
+        && bad "'$ce' holds files owned by uid $cforeign, not you ($(id -u)) — an
+  older image wrote them as a different user; fix with: sudo chown -R $me $ch"
+    done
+  else
+    info "no image yet — mount writability is checked once one is built"
   fi
   local cid
   cid="$(docker ps -q -f "name=^${CONTAINER_NAME}$")"
