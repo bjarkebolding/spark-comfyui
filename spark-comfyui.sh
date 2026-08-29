@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.08.29 | License: MIT
+#  Version 2026.08.29.1 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -131,7 +131,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.08.29"
+VERSION="2026.08.29.1"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -149,12 +149,15 @@ BASE_DIR="${BASE_DIR:-$(dirname "$SELF")}"
 SAGE_REF="${SAGE_REF:-d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5}"
 REPO_URL="${REPO_URL:-https://github.com/Comfy-Org/ComfyUI.git}"
 TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu130}"
-# Community sm_121/aarch64/cu13 GPU onnxruntime (no official PyPI wheel
-# exists). The #sha256= fragment pins the exact bytes: pip verifies it before
-# installing, so a compromised or force-pushed hosting repo fails loudly
-# instead of installing silently. Overriding ORT_WHEEL_URL replaces the pin
-# too — re-add a fragment for your own wheel if you want the same guarantee.
-ORT_WHEEL_URL="${ORT_WHEEL_URL:-https://huggingface.co/Jay0515/onnxruntime-gpu-aarch64-cuda13-sm121/resolve/main/onnxruntime_gpu-1.25.0-cp312-cp312-linux_aarch64.whl#sha256=da487cc1ccd3aa11389efec14c6f0f8b6bd7ca6734423de3b528e578023cb200}"
+# GPU onnxruntime for the preprocessor nodes. The official PyPI wheel, since
+# PyPI GPU packages became CUDA 13 builds in 1.27 and aarch64 wheels came with
+# them; before 2026-08-29 this was a community sm_121 build hosted by one
+# person on HuggingFace, with no fallback if it ever disappeared. The
+# #sha256= fragment pins the exact bytes: pip verifies it before installing,
+# so a substituted file fails loudly instead of installing silently.
+# Overriding ORT_WHEEL_URL replaces the pin too — re-add a fragment for your
+# own wheel if you want the same guarantee.
+ORT_WHEEL_URL="${ORT_WHEEL_URL:-https://files.pythonhosted.org/packages/fa/96/1be0b9711a614861fbf5c0c85c4da3aa2321f9da0b4734a717eb606f70ab/onnxruntime_gpu-1.29.0-cp312-cp312-manylinux_2_34_aarch64.whl#sha256=545d2966dd11208bbc98e67be4d92e54ecd793acc45c0532cc7bfd36f50692fa}"
 PORT="${PORT:-8188}"
 # Host interface the UI port is published on. Empty is docker's own default:
 # every interface, which is what a headless Spark reached from a laptop needs,

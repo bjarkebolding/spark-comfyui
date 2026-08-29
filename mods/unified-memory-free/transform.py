@@ -3,7 +3,10 @@
 
 On GB10 unified memory, torch.cuda.mem_get_info under-reports free memory when
 another CUDA process is resident, causing needless offload and 5-15x slower
-sampling. psutil.virtual_memory().available is the correct free-pool figure.
+sampling. Host-available memory is the correct free-pool figure. Prefer
+comfy.system_memory.virtual_memory_available(), which upstream made
+cgroup-aware on 2026-08-27, and fall back to raw psutil if that module ever
+moves; we run in a container, so the cgroup view is the honest one.
 
 Reads source on stdin, writes patched source to stdout. No-op (echoes input)
 if the anchor can't be found, so the caller can detect "anchor not found".
@@ -35,8 +38,14 @@ inject = (
     "    # when another CUDA process is resident; use host-available memory\n"
     "    # as the truth for the shared pool.\n"
     "    try:\n"
-    "        import psutil as _ps\n"
-    "        _avail = _ps.virtual_memory().available\n"
+    "        try:\n"
+    "            # cgroup-aware since upstream 2026-08-27; we run in a\n"
+    "            # container, so a raw psutil read would report the HOST\n"
+    "            # pool and overshoot under a docker --memory limit.\n"
+    "            _avail = comfy.system_memory.virtual_memory_available()\n"
+    "        except Exception:\n"
+    "            import psutil as _ps\n"
+    "            _avail = _ps.virtual_memory().available\n"
     "        _dev = dev if dev is not None else 'cuda'\n"
     "        if 'cpu' not in str(_dev):\n"
     "            if torch_free_too:\n"

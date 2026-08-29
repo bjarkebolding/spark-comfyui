@@ -92,19 +92,44 @@ assert cos > 0.98, f"cosine {cos.item():.4f}"
 PY
 }
 
-# ONNX Runtime GPU check. get_available_providers() is the RELIABLE detector;
-# startup-log GPU-discovery warnings are misleading and can appear even when
-# the GPU provider works fine.
+# ONNX Runtime GPU check: a REAL session on a REAL model, never a provider
+# string. get_available_providers() lists what was COMPILED IN, so it names
+# CUDAExecutionProvider even in a process where the provider cannot load
+# (measured 2026-08-29: unresolvable libcublasLt.so.13, session silently on
+# CPU at 5x the time, old string check passed anyway). Naming CUDA as the
+# only provider does not make ORT raise either, it falls back and reports it
+# in get_providers(), which is why the assert below reads the SESSION.
+#
+# No torch import is needed: the runtime image puts torch's bundled CUDA
+# libraries on LD_LIBRARY_PATH, so ORT resolves them on its own. That is
+# what makes this gate cheap enough to run on every start, and it is also
+# why a node that reaches onnxruntime without importing torch no longer
+# lands silently on CPU.
+#
+# The model is embedded rather than built with the onnx package, which is not
+# in the image and must not be added for a gate. 193 bytes, one 3x3 conv:
+# the cuDNN path the DWPose and ControlNet preprocessors actually use.
 onnx_gpu_ok() {
   python - <<'PY' >/dev/null 2>&1
+import base64, numpy as np
 import onnxruntime as ort
-assert "CUDAExecutionProvider" in ort.get_available_providers()
+MODEL = base64.b64decode(
+    "CAo6tgEKOQoBWAoBVxIBWSIEQ29udioVCgxrZXJuZWxfc2hhcGVAA0ADoAEHKhEKBHBhZH"
+    "NAAUABQAFAAaABBxIKc3BhcmtfZ2F0ZSozCAEIAQgDCAMQAUIBV0okAAAAPwAAAD8AAAA/"
+    "AAAAPwAAAD8AAAA/AAAAPwAAAD8AAAA/WhsKAVgSFgoUCAESEAoCCAEKAggBCgIICAoCCA"
+    "hiGwoBWRIWChQIARIQCgIIAQoCCAEKAggICgIICEIECgAQEg=="
+)
+s = ort.InferenceSession(MODEL, providers=["CUDAExecutionProvider"])
+assert s.get_providers()[0] == "CUDAExecutionProvider", s.get_providers()
+y = s.run(None, {"X": np.ones((1, 1, 8, 8), dtype=np.float32)})[0]
+assert np.isfinite(y).all()
+assert abs(float(y[0, 0, 4, 4]) - 4.5) < 1e-4, float(y[0, 0, 4, 4])
 PY
 }
 
-# DWPose / ControlNet preprocessors run on onnxruntime. PyPI ships no GPU
-# wheel for aarch64+cu13, so without the community sm_121 wheel they silently
-# fall back to CPU — a large hidden slowdown. Also guards the shadow trap:
+# DWPose / ControlNet preprocessors run on onnxruntime. Without the GPU wheel
+# they silently fall back to CPU — a large hidden slowdown. Also guards the
+# shadow trap:
 # a later 'pip install onnxruntime' (e.g. pulled in by a custom node)
 # overwrites the GPU wheel via the shared import path with no pip conflict.
 #
@@ -112,8 +137,8 @@ PY
 # guard and for the same reason: node installs are when shadowing happens.
 # The Dockerfile installs the pinned wheel at build time, doctor detects
 # drift, and this repairs it, which makes onnx symmetric with torch (mod 20).
-# The healthy path is one provider query and costs ~0.06s; only a genuinely
-# shadowed install pays the reinstall. The caller treats a failure as a warn,
+# The healthy path builds one tiny CUDA session; only a genuinely shadowed
+# install pays the reinstall. The caller treats a failure as a warn,
 # never a die: CPU onnxruntime is a slowdown, not a broken server.
 ensure_onnx_gpu() {
   local pyver
@@ -127,7 +152,7 @@ Skipping — preprocessor nodes (DWPose etc.) will use CPU onnxruntime."
     echo "onnxruntime: OK — GPU provider live"
     return 0
   fi
-  log "Installing sm_121 GPU onnxruntime (community wheel)"
+  log "Installing GPU onnxruntime"
   # Remove PyPI CPU dists that shadow the same import path first.
   pip uninstall -y onnxruntime onnxruntime-gpu >/dev/null 2>&1 || true
   pip install "$ORT_WHEEL_URL"

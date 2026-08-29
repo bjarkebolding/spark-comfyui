@@ -236,7 +236,7 @@ Start with `./spark-comfyui.sh doctor`; every failure names its fix. Common ones
 ## Security notes
 
 - Custom nodes run as a non-root user with all capabilities dropped and only your content directories and the GPU visible. A malicious node cannot read your SSH keys or anything else on the host.
-- The image is reproducible from this repo: both base images pinned by digest as well as tag, pinned ComfyUI commit, pinned SageAttention commit, sha256-pinned onnxruntime wheel. `update --rollback` returns to the previous image atomically.
+- The image is reproducible from this repo: both base images pinned by digest as well as tag, pinned ComfyUI commit, pinned SageAttention commit, sha256-pinned onnxruntime wheel from PyPI. `update --rollback` returns to the previous image atomically.
 - **`install` and `update` seed `comfyui-nodes.list` with one active entry**, so a fresh install, and an upgrade of an existing one, downloads and runs one third-party node from the Comfy Registry ([comfyui-workflow-models-downloader](https://registry.comfy.org/publishers/slahiri/nodes/comfyui-workflow-models-downloader)). Both print the file when they write it. Comment the line out before your next `run` if you want an install that executes no third-party node code. Everything the containment above says still applies to it.
 
 - The UI is published on every interface by default, so anything on your LAN can reach it. `BIND_ADDR=127.0.0.1` restricts it to the box itself; reach it from elsewhere over an SSH tunnel.

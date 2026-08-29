@@ -43,7 +43,16 @@ ARG REPO_URL=https://github.com/Comfy-Org/ComfyUI.git
 ARG COMFY_SHA=master
 ARG SAGE_REPO=https://github.com/thu-ml/SageAttention.git
 ARG SAGE_REF=d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5
-ARG ORT_WHEEL_URL=https://huggingface.co/Jay0515/onnxruntime-gpu-aarch64-cuda13-sm121/resolve/main/onnxruntime_gpu-1.25.0-cp312-cp312-linux_aarch64.whl#sha256=da487cc1ccd3aa11389efec14c6f0f8b6bd7ca6734423de3b528e578023cb200
+# Official PyPI onnxruntime-gpu. PyPI GPU packages have been CUDA 13 builds
+# since 1.27 and aarch64 wheels appeared with them, which retires the
+# community sm_121 wheel this used to point at: one file, one HuggingFace
+# user, no fallback. Verified 2026-08-29 on GB10 with a real CUDA-only
+# session, identical per-run time and bit-identical output to the wheel it
+# replaces. Pinned as a URL rather than a version so the #sha256= fragment
+# still makes pip verify the exact bytes; that also pins the platform tag,
+# so a future Python bump fails the build loudly instead of silently
+# resolving some other wheel.
+ARG ORT_WHEEL_URL=https://files.pythonhosted.org/packages/fa/96/1be0b9711a614861fbf5c0c85c4da3aa2321f9da0b4734a717eb606f70ab/onnxruntime_gpu-1.29.0-cp312-cp312-manylinux_2_34_aarch64.whl#sha256=545d2966dd11208bbc98e67be4d92e54ecd793acc45c0532cc7bfd36f50692fa
 ARG TORCH_CUDA_ARCH_LIST=12.1+PTX
 # There is deliberately NO UID build arg, and adding one is a regression.
 # The image bakes no host identity: it is built as uid 1000 internally and
@@ -281,6 +290,18 @@ USER comfy
 # exactly like pip's downloads do. UV_LINK_MODE=copy because the cache volume
 # and the venv are different filesystems: uv would try to hardlink, fail, warn,
 # and fall back to copying anyway on every single install.
+# LD_LIBRARY_PATH points at torch's own pip-installed CUDA libraries, and it
+# is not a convenience. Without it, onnxruntime's CUDA provider only loads in
+# a process that imported torch FIRST, because that import is what pulls
+# libcublasLt.so.13 and friends into the process. ComfyUI does import torch
+# first, so the server was fine, but anything reaching onnxruntime on its own
+# (a node shelling out to a subprocess, our own gate) got a session that
+# silently fell back to CPU while get_available_providers() still said CUDA.
+# Measured 2026-08-29: with this set, an ORT CUDA session builds and runs
+# correctly with no torch import at all. Verified in the same pass that torch,
+# the SageAttention kernel gate, the NVFP4 gate and the stdlib C extensions
+# are all unaffected, i.e. nothing here shadows a system library.
+ENV LD_LIBRARY_PATH=/opt/comfyui-env/lib/python3.12/site-packages/nvidia/cu13/lib:/opt/comfyui-env/lib/python3.12/site-packages/nvidia/cudnn/lib
 ENV HOME=/home/comfy \
     USER=comfy \
     LOGNAME=comfy \
