@@ -61,6 +61,26 @@ assert o.shape == q.shape and torch.isfinite(o).all()
 PY
 }
 
+# Comfy Kitchen INT8 attention, the same live-kernel treatment as sage above:
+# comfy_kitchen.int8_attention_is_available() is a capability probe, not proof
+# that a kernel runs, so this calls ComfyUI's own wrapper on a realistic
+# diffusion shape and checks the result. Only consulted when the caller asked
+# for this backend (SPARK_ATTENTION=ck); the default path never pays for it.
+ck_attention_ok() {
+  python - <<'PY' >/dev/null 2>&1
+import sys
+sys.path.insert(0, "/opt/ComfyUI")
+import torch, comfy_kitchen
+assert comfy_kitchen.int8_attention_is_available()
+import comfy.ldm.modules.attention as A
+b, h, s, d = 1, 24, 4096, 64
+q = torch.randn(b, s, h * d, dtype=torch.bfloat16, device="cuda")
+o = A.attention_comfy_kitchen_int8(q, q, q, h)
+torch.cuda.synchronize()
+assert o.shape == q.shape and torch.isfinite(o).all()
+PY
+}
+
 # comfy-kitchen NVFP4 live gate. ComfyUI auto-selects comfy-kitchen's
 # fastest backend per call and quietly uses the pure-PyTorch 'eager' path
 # when the native CUDA backend can't serve it — quantized (NVFP4/FP8)

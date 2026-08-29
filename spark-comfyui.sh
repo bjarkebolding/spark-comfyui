@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.08.29.1 | License: MIT
+#  Version 2026.08.29.2 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -131,7 +131,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.08.29.1"
+VERSION="2026.08.29.2"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -1742,6 +1742,7 @@ the calling uid, and root would write root-owned files into your content"
     -e SPARK_BF16_VAE
     -e SPARK_STATIC_VRAM
     -e SPARK_RESERVE_VRAM
+    -e SPARK_ATTENTION
   )
   # The node list is a script-adjacent config file like the patch list, not
   # user content, so it is mounted directly rather than going through the

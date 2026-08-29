@@ -55,7 +55,9 @@ Models go in `data/models/checkpoints` (etc.). No venv, no system Python changes
 
 Disk knobs, applied by `update` and `prune`: `CACHE_KEEP_DAYS` (default 7) drops build cache untouched for that long, `CACHE_MAX_GB` (default 40) caps its total size. Either at `0` disables that pass. The cap is the one that matters if you rebuild often, because the age filter measures last use and a frequent rebuild keeps every layer fresh.
 
-Runtime knobs, set at `run` time: `SPARK_RESERVE_VRAM=8` keeps 8 GB of the unified pool free (hardens against the overcommit freeze when pushing large models), `SPARK_BF16=0` disables the bf16 fast path, `SPARK_BF16_VAE=0` keeps that fast path but takes the VAE off bf16, `SPARK_STATIC_VRAM=1` disables DynamicVRAM, `SHM_SIZE` sets the container's `/dev/shm` ceiling (default `16g`, the Spark figure for large tensor transfers).
+Runtime knobs, set at `run` time: `SPARK_RESERVE_VRAM=8` keeps 8 GB of the unified pool free (hardens against the overcommit freeze when pushing large models), `SPARK_BF16=0` disables the bf16 fast path, `SPARK_BF16_VAE=0` keeps that fast path but takes the VAE off bf16, `SPARK_STATIC_VRAM=1` disables DynamicVRAM, `SHM_SIZE` sets the container's `/dev/shm` ceiling (default `16g`, the Spark figure for large tensor transfers), `SPARK_ATTENTION` picks the attention backend: `sage` (default), `sdpa` or `ck` for upstream's Comfy Kitchen INT8. Whichever you pick is verified with a real kernel run before the server starts, and a failure refuses to launch rather than quietly serving on another backend.
+
+On this hardware the choice only shows up once the workload is compute-bound. At 1024x1024 all three land inside the noise band; at 1536x1536 SDPA costs about 4 percent while `sage` and `ck` tie.
 
 Network knobs: `PORT` (default `8188`) is the host port, and `BIND_ADDR` is the host interface it is published on. `BIND_ADDR` is empty by default, which is docker's own behaviour and means every interface, because a Spark is a headless box you reach from a laptop. Set it to take the UI off the network:
 

@@ -377,16 +377,54 @@ ensure_onnx_gpu \
   || warn "onnxruntime GPU guard did not complete — DWPose and ControlNet
 preprocessors may fall back to CPU this session (spark-comfyui.sh doctor re-checks)"
 
-# 6. SageAttention live kernel gate. The image build compiled it blind (no
-#    GPU exists at build time); this is where golden rule 3 now lives.
-log "SageAttention kernel gate"
-if sage_kernel_ok; then
-  sage_flag=(--use-sage-attention)
-  info "SageAttention enabled (kernel verified live)"
-else
-  die "SageAttention kernel FAILED on this GPU — refusing to launch degraded.
+# 6. Attention backend, chosen by SPARK_ATTENTION and then GATED LIVE. The
+#    image build compiled SageAttention blind (no GPU exists at build time),
+#    so this is where golden rule 3 lives for whichever backend is selected.
+#    ComfyUI's attention flags are a mutually exclusive argparse group, so
+#    exactly one of these may be passed.
+#
+#    The gate dies rather than falling back on purpose: silently serving with
+#    an attention backend the caller did not ask for is the degradation this
+#    step exists to prevent. sdpa needs no gate because it is torch itself,
+#    which the guard in step 4 already verified.
+attn_flag=()
+case "${SPARK_ATTENTION:-sage}" in
+  sage)
+    log "SageAttention kernel gate"
+    if sage_kernel_ok; then
+      attn_flag=(--use-sage-attention)
+      info "SageAttention enabled (kernel verified live)"
+    else
+      die "SageAttention kernel FAILED on this GPU — refusing to launch degraded.
 Rebuild the image: spark-comfyui.sh update"
-fi
+    fi
+    ;;
+  ck)
+    log "Comfy Kitchen attention kernel gate"
+    if ck_attention_ok; then
+      attn_flag=(--use-ck-attention)
+      info "Comfy Kitchen INT8 attention enabled (kernel verified live)"
+    else
+      die "SPARK_ATTENTION=ck was requested but the Comfy Kitchen INT8 kernel
+FAILED on this GPU — refusing to launch degraded. Unset SPARK_ATTENTION to use
+SageAttention."
+    fi
+    ;;
+  sdpa)
+    info "attention: PyTorch SDPA (SPARK_ATTENTION=sdpa), no quantized backend"
+    ;;
+  *)
+    warn "ignoring SPARK_ATTENTION='${SPARK_ATTENTION}' (expected sage, sdpa or ck)"
+    log "SageAttention kernel gate"
+    if sage_kernel_ok; then
+      attn_flag=(--use-sage-attention)
+      info "SageAttention enabled (kernel verified live)"
+    else
+      die "SageAttention kernel FAILED on this GPU — refusing to launch degraded.
+Rebuild the image: spark-comfyui.sh update"
+    fi
+    ;;
+esac
 
 # 7. Launch. Flags mirror the native cmd_run; exposure is controlled by the
 #    host's port mapping, so --listen 0.0.0.0 here is scoped to the
@@ -425,6 +463,6 @@ exec python main.py \
   --enable-manager \
   --preview-method auto \
   --disable-pinned-memory \
-  "${sage_flag[@]}" \
+  "${attn_flag[@]}" \
   "${extra_flags[@]}" \
   "$@"
