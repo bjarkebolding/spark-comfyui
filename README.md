@@ -45,7 +45,7 @@ Models go in `data/models/checkpoints` (etc.). No venv, no system Python changes
 | `update [--torch] [--rollback] [--keep[=NAME]]` | Self-updates the tool, then rebuilds the image on current ComfyUI master (cached layers: minutes). The old image stays as `:previous`; `--rollback` swaps back instantly. `--torch` forces fresh PyTorch wheels. `--keep` also pins the image you are leaving as `:keep-NAME` (default: today's date), which survives every later update and `prune`. |
 | `doctor` | Health check: tool and host (driver, docker, image, swap, backups), then the live GPU gates (torch CUDA, sm_121 SageAttention kernel, onnxruntime provider, NVFP4) inside a throwaway container. Every failure names its fix. |
 | `status [--watch [SEC]]` | One-page glance, or a live sparkline dashboard with generation telemetry and a `session:` A/B summary. Every sample lands in `thermal_monitor.log`, the post-mortem trail for silent hard-reboots. |
-| `tune [--clock-cap MHZ] [--persist]` | Host stability: swap off, persistence mode, optional clock cap (~2100 fixes overcurrent hard-reboots). |
+| `tune [--clock-cap MHZ] [--persist]` <br> `tune --revert` | Host stability: swap off, persistence mode, optional clock cap (~2100 fixes overcurrent hard-reboots). `--revert` puts all of it back: swap on, clocks unlocked, persistence off, the boot unit and the sysctl line removed. |
 | `backup [--with-output] [FILE]` | Small tgz of workflows, settings, inputs, configs and the custom-node set. Models are manifested, never archived. Safe while running. |
 | `restore FILE` | Rebuilds from a backup: image if missing, content into `data/`, custom nodes re-cloned at pinned commits, missing models listed with sizes. |
 | `prune [--yes]` | Reclaims disk: drops leftover image tags and trims the BuildKit cache to its age and size limits. Keeps `:latest`, `:previous` and every `keep-*` pin, and never rebuilds. Shows what goes before it goes. |
@@ -56,6 +56,15 @@ Models go in `data/models/checkpoints` (etc.). No venv, no system Python changes
 Disk knobs, applied by `update` and `prune`: `CACHE_KEEP_DAYS` (default 7) drops build cache untouched for that long, `CACHE_MAX_GB` (default 40) caps its total size. Either at `0` disables that pass. The cap is the one that matters if you rebuild often, because the age filter measures last use and a frequent rebuild keeps every layer fresh.
 
 Runtime knobs, set at `run` time: `SPARK_RESERVE_VRAM=8` keeps 8 GB of the unified pool free (hardens against the overcommit freeze when pushing large models), `SPARK_BF16=0` disables the bf16 fast path, `SPARK_BF16_VAE=0` keeps that fast path but takes the VAE off bf16, `SPARK_STATIC_VRAM=1` disables DynamicVRAM, `SHM_SIZE` sets the container's `/dev/shm` ceiling (default `16g`, the Spark figure for large tensor transfers).
+
+Network knobs: `PORT` (default `8188`) is the host port, and `BIND_ADDR` is the host interface it is published on. `BIND_ADDR` is empty by default, which is docker's own behaviour and means every interface, because a Spark is a headless box you reach from a laptop. Set it to take the UI off the network:
+
+```bash
+BIND_ADDR=127.0.0.1 ./spark-comfyui.sh service   # this box only
+BIND_ADDR=192.168.1.50 ./spark-comfyui.sh run    # one interface
+```
+
+`status` reads the binding back from the running container rather than from your environment, so it always prints a URL that actually works. Reaching a loopback-bound UI from elsewhere is then an SSH tunnel: `ssh -N -L 8188:127.0.0.1:8188 you@spark`.
 
 The VAE one has a flag form, `--no-bf16-vae`, which works with any command:
 
@@ -227,11 +236,13 @@ Start with `./spark-comfyui.sh doctor`; every failure names its fix. Common ones
 ## Security notes
 
 - Custom nodes run as a non-root user with all capabilities dropped and only your content directories and the GPU visible. A malicious node cannot read your SSH keys or anything else on the host.
-- The image is reproducible from this repo: pinned ComfyUI commit, sha256-pinned onnxruntime wheel, pinned SageAttention. `update --rollback` returns to the previous image atomically.
+- The image is reproducible from this repo: both base images pinned by digest as well as tag, pinned ComfyUI commit, pinned SageAttention commit, sha256-pinned onnxruntime wheel. `update --rollback` returns to the previous image atomically.
 - **`install` and `update` seed `comfyui-nodes.list` with one active entry**, so a fresh install, and an upgrade of an existing one, downloads and runs one third-party node from the Comfy Registry ([comfyui-workflow-models-downloader](https://registry.comfy.org/publishers/slahiri/nodes/comfyui-workflow-models-downloader)). Both print the file when they write it. Comment the line out before your next `run` if you want an install that executes no third-party node code. Everything the containment above says still applies to it.
 
+- The UI is published on every interface by default, so anything on your LAN can reach it. `BIND_ADDR=127.0.0.1` restricts it to the box itself; reach it from elsewhere over an SSH tunnel.
+
 > [!WARNING]
-> Manager's `personal_cloud` mode is fine on a trusted LAN. Do not expose the port to the internet.
+> ComfyUI has no authentication. Manager's `personal_cloud` mode is fine on a trusted LAN. Do not expose the port to the internet.
 
 ---
 

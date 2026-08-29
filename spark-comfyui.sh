@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.08.23 | License: MIT
+#  Version 2026.08.29 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -53,11 +53,16 @@
 #                              every 5s or SEC) and appends every sample to
 #                              thermal_monitor.log — the evidence trail for
 #                              diagnosing silent hard-reboots survives them.
-#    tune [--clock-cap MHZ] [--persist]
+#    tune [--clock-cap MHZ] [--persist] | tune --revert
 #                              Host-side stability: disable swap (prevents
 #                              unified-memory freezes), persistence mode,
 #                              optional clock cap (~2100 fixes overcurrent
 #                              hard-reboots). --persist survives reboots.
+#                              --revert puts all of it back: swap on, clocks
+#                              unlocked, persistence off, the boot unit and
+#                              the sysctl line removed. For sharing the box
+#                              with something else, or ruling the tuning out
+#                              while chasing a problem.
 #    recipe list|show|check|install|capture
 #                              Everything a workflow needs, as data: the
 #                              workflow, its custom nodes, and every model
@@ -126,7 +131,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.08.23"
+VERSION="2026.08.29"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -151,6 +156,17 @@ TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu130}"
 # too — re-add a fragment for your own wheel if you want the same guarantee.
 ORT_WHEEL_URL="${ORT_WHEEL_URL:-https://huggingface.co/Jay0515/onnxruntime-gpu-aarch64-cuda13-sm121/resolve/main/onnxruntime_gpu-1.25.0-cp312-cp312-linux_aarch64.whl#sha256=da487cc1ccd3aa11389efec14c6f0f8b6bd7ca6734423de3b528e578023cb200}"
 PORT="${PORT:-8188}"
+# Host interface the UI port is published on. Empty is docker's own default:
+# every interface, which is what a headless Spark reached from a laptop needs,
+# and is why the default cannot change without silently breaking every
+# existing install. Set it to keep the UI off the LAN:
+#   BIND_ADDR=127.0.0.1 ./spark-comfyui.sh service   # this box only
+# The container always passes --listen 0.0.0.0 to main.py, and that stays
+# right: it is scoped to the container's own network namespace and exposes
+# nothing by itself (container/entrypoint.sh says so at the launch line). The
+# publish flag in _container_run_args is the only thing that decides what the
+# network can reach.
+BIND_ADDR="${BIND_ADDR:-}"
 
 # (pip network resilience used to be exported here. It never reached anything
 # after the container cut — no host-side pip exists, and docker forwards
@@ -373,15 +389,103 @@ $BASE_DIR?) — continuing with the current version. To update manually:
 # =============================================================================
 #  tune — system-level stability & performance (field-validated on GB10)
 # =============================================================================
+# The inverse of cmd_tune, step for step, ordered by risk rather than by
+# mirroring: the persisted unit goes FIRST so that a failure anywhere below
+# leaves a box that at least stops re-applying the tuning on next boot, and
+# swap goes LAST because re-enabling it is the one step that puts the freeze
+# risk back, so its warning should be the last thing on screen. Same
+# skip-if-already-in-the-target-state rule as tune, so a second --revert asks
+# for no password it does not need.
+_tune_revert() {
+  log "Reverting DGX Spark system tuning"
+
+  # 1) The persisted unit, if --persist ever wrote one.
+  local unit=/etc/systemd/system/comfyui-tune.service
+  if [[ -f "$unit" ]]; then
+    sudo systemctl disable --now comfyui-tune.service >/dev/null 2>&1 || true
+    sudo rm -f "$unit"
+    sudo systemctl daemon-reload
+    echo "  comfyui-tune.service removed (tuning no longer re-applies at boot)"
+  else
+    echo "  no persisted tuning unit"
+  fi
+
+  # 2) GPU clocks. NOTHING reports an -lgc lock range: the clocks_event_reasons
+  #    fields cover the applications-clocks lever and the power cap, not this
+  #    one, and GB10 reports N/A for most of the clock block anyway. So this
+  #    resets unconditionally instead of pretending to detect. -rgc on a GPU
+  #    that was never locked is a no-op, which is what makes that honest.
+  if sudo nvidia-smi -rgc >/dev/null 2>&1; then
+    echo "  GPU clocks unlocked (reset to the driver default)"
+  else
+    warn "could not reset GPU clocks — 'sudo nvidia-smi -rgc' failed"
+  fi
+
+  # 3) Persistence mode. This one IS queryable, so it skips cleanly.
+  if [[ "$(nvidia-smi --query-gpu=persistence_mode --format=csv,noheader 2>/dev/null)" == "Enabled" ]]; then
+    sudo nvidia-smi -pm 0 >/dev/null && echo "  persistence mode: off"
+  else
+    echo "  persistence mode: already off"
+  fi
+
+  # 4) Swappiness. tune appends one fixed line, so deleting that exact line is
+  #    a complete undo of the file. The live value it displaced was never
+  #    recorded anywhere, so this restores the kernel default rather than
+  #    inventing a number the box may never have had.
+  if grep -q '^vm\.swappiness=10$' /etc/sysctl.conf 2>/dev/null; then
+    sudo sed -i '/^vm\.swappiness=10$/d' /etc/sysctl.conf
+    echo "  vm.swappiness=10 removed from /etc/sysctl.conf"
+    # The live value is reset only because OUR line was there. Without that
+    # proof a swappiness of 10 is somebody else's setting — a drop-in under
+    # /etc/sysctl.d, a distro default — and overwriting it would be this
+    # command reaching past what it put there.
+    if [[ "$(sysctl -n vm.swappiness 2>/dev/null)" == "10" ]]; then
+      sudo sysctl -w vm.swappiness=60 >/dev/null
+      echo "  vm.swappiness=60 (the kernel default)"
+    fi
+  else
+    echo "  no vm.swappiness line of ours in /etc/sysctl.conf"
+  fi
+
+  # 5) Swap. 'swapoff -a' never touched /etc/fstab, so 'swapon -a' restores
+  #    exactly what the box shipped with. A box with no swap entry has nothing
+  #    to restore, and that is a fact to report, not a failure.
+  local swap_back=0
+  if [[ -n "$(swapon --noheadings 2>/dev/null)" ]]; then
+    echo "  swap already enabled"; swap_back=1
+  else
+    sudo swapon -a 2>/dev/null || true
+    if [[ -n "$(swapon --noheadings 2>/dev/null)" ]]; then
+      echo "  swap re-enabled from /etc/fstab"; swap_back=1
+    else
+      echo "  no swap entry in /etc/fstab — nothing to re-enable"
+    fi
+  fi
+  # Only warn when swap is actually back on: on a box that has none, saying
+  # so would be a false alarm about a state that does not exist.
+  (( swap_back )) && warn "swap is on again. On unified memory a workload that
+approaches the limit thrashes instead of getting a clean OOM kill, and the box
+can freeze with no logs — re-run '$0 tune' before the next heavy generation."
+  return 0
+}
+
 cmd_tune() {
-  local clock_cap="" persist=0
+  local clock_cap="" persist=0 revert=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --clock-cap) clock_cap="${2:?--clock-cap needs a MHz value, e.g. 2100}"; shift 2 ;;
       --persist)   persist=1; shift ;;
-      *) die "Unknown tune option: $1 (use --clock-cap MHZ and/or --persist)" ;;
+      --revert)    revert=1; shift ;;
+      *) die "Unknown tune option: $1 (use --clock-cap MHZ, --persist or --revert)" ;;
     esac
   done
+  if (( revert )); then
+    [[ -z "$clock_cap" && "$persist" -eq 0 ]] \
+      || die "--revert undoes the tuning, so it cannot be combined with
+--clock-cap or --persist — run it on its own"
+    _tune_revert
+    return 0
+  fi
   # Validate up front: a bad value would otherwise die mid-run on nvidia-smi's
   # error, skipping the remaining tune steps. 300 is the -lgc floor used below.
   if [[ -n "$clock_cap" ]]; then
@@ -970,7 +1074,7 @@ cmd_status() {
         unhealthy) where+=", NOT ANSWERING" ;;
       esac
     fi
-    echo "  ComfyUI RUNNING (pid $pid$where) -> http://$(hostname -I 2>/dev/null | awk '{print $1}'):$PORT"
+    echo "  ComfyUI RUNNING (pid $pid$where) -> $(_published_url)"
     pgrep -af "main.py --listen" | grep -q "use-sage-attention" \
       && echo "  attention: SageAttention" || echo "  attention: PyTorch SDPA"
   else
@@ -1600,6 +1704,14 @@ _container_run_args() {
   # docker's own error is fine but arrives further into the launch.
   [[ "$SHM_SIZE" =~ ^[0-9]+[bkmgBKMG]?$ ]] \
     || die "SHM_SIZE must be a docker size like 16g, 512m or a byte count (got: $SHM_SIZE)"
+  # Shape check only. An address that does not exist on this box, or a name
+  # that does not resolve, is docker's to reject and it does so loudly at
+  # launch. This catches the typo that would otherwise be swallowed into the
+  # publish string, where it reads as part of the port mapping.
+  [[ -z "$BIND_ADDR" ]] \
+    || [[ "$BIND_ADDR" =~ ^[A-Za-z0-9._%-]+$ ]] \
+    || [[ "$BIND_ADDR" =~ ^\[?[0-9A-Fa-f:]+\]?$ ]] \
+    || die "BIND_ADDR must be a host IP or hostname, e.g. 127.0.0.1 (got: $BIND_ADDR)"
   # The container runs as the CALLER, every launch. This is the whole of the
   # uid story: the image bakes no identity (see the Dockerfile header), and the
   # bind-mounted content is owned by whoever ran this script, because the host
@@ -1621,7 +1733,7 @@ the calling uid, and root would write root-owned files into your content"
     --shm-size "$SHM_SIZE"
     --cap-drop ALL
     --security-opt no-new-privileges
-    -p "$PORT:8188"
+    -p "$(_bind_host)${BIND_ADDR:+:}$PORT:8188"
     -v "$CONTAINER_IMAGE-cache:/home/comfy/.cache"
     -e SPARK_BF16
     -e SPARK_BF16_VAE
@@ -1637,6 +1749,45 @@ the calling uid, and root would write root-owned files into your content"
     && CRUN_ARGS+=(-v "$NODES_LIST:/opt/spark/comfyui-nodes.list:ro")
   _content_mount_args
   CRUN_ARGS+=("${CMOUNT_ARGS[@]}")
+}
+
+# BIND_ADDR in the form docker's -p and a URL both want: a bare IPv6 address
+# needs brackets, everything else passes through untouched. Empty stays empty,
+# which is docker's "every interface".
+_bind_host() {
+  case "$BIND_ADDR" in
+    ""|\[*\])  echo "$BIND_ADDR" ;;
+    *:*)        echo "[$BIND_ADDR]" ;;
+    *)          echo "$BIND_ADDR" ;;
+  esac
+}
+
+# The URL to open, derived from the CURRENT environment. For 'install' and the
+# two launch commands that is exactly right, because they are the invocation
+# that publishes the port. A wildcard binding has no single answer, so the
+# box's own LAN address is the useful one.
+_ui_url() {
+  local h; h="$(_bind_host)"
+  case "$h" in
+    ""|0.0.0.0|"[::]") h="$(hostname -I 2>/dev/null | awk '{print $1}')" ;;
+  esac
+  echo "http://${h:-<spark-ip>}:$PORT"
+}
+
+# The URL of the RUNNING container, asked of docker rather than re-derived
+# from the environment. Those two disagree the moment a service was started
+# with a BIND_ADDR that this shell does not have set, and then the derived
+# answer is a confidently printed URL that does not work. Falls back to the
+# derived one when nothing is running, which is the only honest answer then.
+_published_url() {
+  local m
+  m="$(docker port "$CONTAINER_NAME" 8188/tcp 2>/dev/null | head -1 || true)"
+  [[ -n "$m" ]] || { _ui_url; return; }
+  case "$m" in
+    0.0.0.0:*|"[::]:"*) echo "http://$(hostname -I 2>/dev/null \
+                          | awk '{print $1}'):${m##*:}" ;;
+    *)                  echo "http://$m" ;;
+  esac
 }
 
 # The content mounts on their own, as docker -v flags in CMOUNT_ARGS: the
@@ -1675,7 +1826,7 @@ cmd_run() {
   # Same guard 'service' carries.
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   _container_run_args
-  log "Launching containerized ComfyUI on port $PORT (Ctrl-C stops it)"
+  log "Launching containerized ComfyUI on $(_ui_url) (Ctrl-C stops it)"
   # --rm: every launch starts from the immutable image; runtime pip state
   # lives at most until the container exits, and the cache volume keeps
   # downloads and compiled sm_121 kernels fast across recreation.
@@ -1709,7 +1860,7 @@ cmd_service() {
   log "Starting containerized ComfyUI as a service (docker restart policy)"
   docker run -d --restart unless-stopped "${CRUN_ARGS[@]}" \
     "$CONTAINER_IMAGE:latest" >/dev/null
-  echo "  Running detached on port $PORT; survives crashes and reboots."
+  echo "  Serving on $(_ui_url); survives crashes and reboots."
   echo "  Health:  docker ps shows 'healthy' once it is actually serving"
   echo "  Logs:    docker logs -f $CONTAINER_NAME"
   echo "  Stop:    $0 stop   (docker restarts it on next boot)"
@@ -1727,8 +1878,6 @@ cmd_install() {
   seed_nodes_list
   mkdir -p "$DATA_DIR"
   cmd_build
-  local ip_hint
-  ip_hint="$(hostname -I 2>/dev/null | awk '{print $1}')"
   log "Done!"
   cat <<EOF
 
@@ -1737,7 +1886,7 @@ cmd_install() {
         or:         $0 service (background, survives reboots)
   Health check:     $0 doctor
   Update later:     $0 update
-  Web UI:           http://${ip_hint:-<spark-ip>}:$PORT
+  Web UI:           $(_ui_url)
   Models go in:     $DATA_DIR/models/checkpoints (etc.)
 EOF
 }

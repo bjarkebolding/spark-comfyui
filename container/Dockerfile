@@ -22,7 +22,22 @@
 # kernel image", the GB10 classic) for zero benefit — sm_121 is fully
 # supported since 13.0.0. Bumping past 13.0.x is a deliberate pin change
 # with a field test, same policy as SAGE_REF.
-ARG CUDA_IMAGE=nvidia/cuda:13.0.3-devel-ubuntu24.04
+#
+# Both base images are pinned by DIGEST as well as by tag. The tag says what
+# we mean, the digest says which bytes we tested: a tag is mutable and both
+# of these are re-pushed regularly, so without the digest two builds a month
+# apart are not the same image. These are INDEX (multi-platform) digests, so
+# they resolve on aarch64 and on anything else. Refresh either one with:
+#   docker buildx imagetools inspect <ref> | awk '/^Digest:/{print $2}'
+# and treat it like SAGE_REF: a deliberate change with a build behind it,
+# never a drive-by edit. A stale pin is not a security hole on its own —
+# every package we actually install comes from a fresh apt/pip fetch at build
+# time — but it does mean the untouched base layers age, so refresh both when
+# you bump CUDA or ComfyUI for real.
+ARG CUDA_IMAGE=nvidia/cuda:13.0.3-devel-ubuntu24.04@sha256:b7ae301dea2c162444795462ce17a05f6a516e5a75944b57af5b88540a1a2266
+# The runtime stage's own base. Named so it is pinned in one place with the
+# other one, instead of hiding as a literal 150 lines down.
+ARG RUNTIME_IMAGE=ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
 ARG TORCH_INDEX=https://download.pytorch.org/whl/cu130
 ARG REPO_URL=https://github.com/Comfy-Org/ComfyUI.git
 ARG COMFY_SHA=master
@@ -186,7 +201,7 @@ USER comfy
 # custom-node requirements at start, and an sdist dep needs a compiler.
 # The SageAttention build tree is NOT copied (246 MB of build residue; the
 # compiled package lives in the venv).
-FROM ubuntu:24.04 AS runtime
+FROM ${RUNTIME_IMAGE} AS runtime
 ARG COMFY_SHA
 ARG SAGE_REF
 ARG TORCH_INDEX
