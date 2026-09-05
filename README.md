@@ -12,13 +12,22 @@
 [![License](https://img.shields.io/github/license/bjarkebolding/spark-comfyui?color=76B900)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-DGX_Spark_%C2%B7_GB10_%C2%B7_sm__121-76B900)
 
+<a href="https://www.star-history.com/#bjarkebolding/spark-comfyui&amp;Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=bjarkebolding/spark-comfyui&amp;type=Date&amp;theme=dark">
+    <img alt="Star history for bjarkebolding/spark-comfyui" src="https://api.star-history.com/svg?repos=bjarkebolding/spark-comfyui&amp;type=Date" width="520">
+  </picture>
+</a>
+
 </div>
 
-The whole GB10-tuned stack (cu130 PyTorch, native sm_121 SageAttention, GPU onnxruntime, the Spark mods) lives in a docker image. Your content (models, workflows, custom nodes, outputs) lives in a plain `data/` directory next to the script and is bind-mounted in. Custom-node code, which is arbitrary third-party Python, runs confined: non-root, no capabilities, nothing visible but your content and the GPU.
+- **One image, whole stack.** cu130 PyTorch, native sm_121 SageAttention, GPU onnxruntime and the GB10 mods, baked in and reproducible from this repo.
+- **Your content stays plain.** Models, workflows, custom nodes and outputs live in a `data/` directory next to the script, bind-mounted in. No venv, no system Python changes.
+- **Third-party code runs confined.** Custom nodes are arbitrary Python. They run non-root, with all capabilities dropped, seeing nothing but your content and the GPU.
 
 ## Contents
 
-[Quick start](#quick-start) · [Commands](#commands) · [What it looks like](#what-it-looks-like) · [Mounts](#mounts) · [Patch list](#patch-list-optional) · [Node list](#node-list) · [Recipes](#recipes) · [Troubleshooting](#troubleshooting) · [Security notes](#security-notes)
+[Quick start](#quick-start) · [Commands](#commands) · [Configuration](#configuration) · [What it looks like](#what-it-looks-like) · [Mounts](#mounts) · [Patch list](#patch-list-optional) · [Node list](#node-list) · [Recipes](#recipes) · [Troubleshooting](#troubleshooting) · [Security notes](#security-notes)
 
 ## Quick start
 
@@ -53,22 +62,34 @@ Models go in `data/models/checkpoints` (etc.). No venv, no system Python changes
 | `recipe list\|show\|check\|install\|capture` | Everything a workflow needs, as data: the workflow, its custom nodes, and every model with a destination, size and sha256. `install` downloads what is missing (resumable, hash-verified) and wires up the rest. `capture` authors one from a workflow that already runs here. |
 | `shell` | Opens a bash shell inside the running container. For inspecting the venv or a custom node. The image is immutable, so nothing you change there survives a restart. |
 
-Version pins: the image builds on a pinned PyTorch (`TORCH_VERSION`, `TORCHVISION_VERSION`, `TORCHAUDIO_VERSION`, default 2.13.0 / 0.28.0 / 2.11.0 for cu130) so a PyTorch release can never change your stack without you asking. `doctor` tells you when a newer torch is on the index, and `./spark-comfyui.sh update --torch` builds against it. If that passes `doctor` and a generation, move the pin.
+## Configuration
 
-Disk knobs, applied by `update` and `prune`: `CACHE_KEEP_DAYS` (default 7) drops build cache untouched for that long, `CACHE_MAX_GB` (default 40) caps its total size. Either at `0` disables that pass. The cap is the one that matters if you rebuild often, because the age filter measures last use and a frequent rebuild keeps every layer fresh.
+Everything is an environment variable, so nothing needs editing to try something.
 
-Runtime knobs, set at `run` time: `SPARK_RESERVE_VRAM=8` keeps 8 GB of the unified pool free (hardens against the overcommit freeze when pushing large models), `SPARK_BF16=0` disables the bf16 fast path, `SPARK_BF16_VAE=0` keeps that fast path but takes the VAE off bf16, `SPARK_STATIC_VRAM=1` disables DynamicVRAM, `SHM_SIZE` sets the container's `/dev/shm` ceiling (default `16g`, the Spark figure for large tensor transfers), `SPARK_ATTENTION` picks the attention backend: `sage` (default), `sdpa` or `ck` for upstream's Comfy Kitchen INT8. Whichever you pick is verified with a real kernel run before the server starts, and a failure refuses to launch rather than quietly serving on another backend.
+### Runtime
 
-On this hardware the choice only shows up once the workload is compute-bound. At 1024x1024 all three land inside the noise band; at 1536x1536 SDPA costs about 4 percent while `sage` and `ck` tie.
+Set at `run` or `service` time.
 
-Network knobs: `PORT` (default `8188`) is the host port, and `BIND_ADDR` is the host interface it is published on. `BIND_ADDR` is empty by default, which is docker's own behaviour and means every interface, because a Spark is a headless box you reach from a laptop. Set it to take the UI off the network:
+| Variable | Default | What it does |
+|---|---|---|
+| `SPARK_ATTENTION` | `sage` | Attention backend: `sage`, `sdpa`, or `ck` for upstream's Comfy Kitchen INT8. Whichever you pick is verified with a real kernel run before the server starts, and a failure refuses to launch rather than quietly serving on another backend. |
+| `SPARK_RESERVE_VRAM` | unset | Keeps that many GB of the unified pool free. Hardens against the overcommit freeze when pushing large models, and leaves room for a co-resident process. |
+| `SPARK_BF16` | `1` | The bf16 fast path. `0` disables it. |
+| `SPARK_BF16_VAE` | `1` | Keeps the fast path but takes the VAE off bf16 when set to `0`. |
+| `SPARK_STATIC_VRAM` | `0` | `1` disables DynamicVRAM. |
+| `SHM_SIZE` | `16g` | The container's `/dev/shm` ceiling. The Spark figure for large tensor transfers. |
+| `PORT` | `8188` | Host port. |
+| `BIND_ADDR` | unset | Host interface the port is published on. Empty is docker's own behaviour and means every interface, because a Spark is a headless box you reach from a laptop. |
 
 ```bash
 BIND_ADDR=127.0.0.1 ./spark-comfyui.sh service   # this box only
-BIND_ADDR=192.168.1.50 ./spark-comfyui.sh run    # one interface
+SPARK_ATTENTION=ck ./spark-comfyui.sh run        # try Comfy Kitchen INT8
 ```
 
 `status` reads the binding back from the running container rather than from your environment, so it always prints a URL that actually works. Reaching a loopback-bound UI from elsewhere is then an SSH tunnel: `ssh -N -L 8188:127.0.0.1:8188 you@spark`.
+
+> [!NOTE]
+> On this hardware the attention backend only matters once the workload is compute-bound. At 1024x1024 all three land inside the noise band; at 1536x1536 SDPA costs about 4 percent while `sage` and `ck` tie.
 
 The VAE one has a flag form, `--no-bf16-vae`, which works with any command:
 
@@ -76,6 +97,27 @@ The VAE one has a flag form, `--no-bf16-vae`, which works with any command:
 ./spark-comfyui.sh service --no-bf16-vae          # LTX-2.3 audio workflows
 ./spark-comfyui.sh run --no-bf16-vae --fp32-vae   # or pick your own precision
 ```
+
+### Build pins
+
+| Variable | Default | What it does |
+|---|---|---|
+| `TORCH_VERSION` | `2.13.0` | Pinned so a PyTorch release can never change your stack without you asking. |
+| `TORCHVISION_VERSION` | `0.28.0` | Pinned alongside torch. |
+| `TORCHAUDIO_VERSION` | `2.11.0` | Pinned alongside torch. |
+
+`doctor` tells you when a newer torch is on the index, and `update --torch` builds against it, ignoring the pin. If that passes `doctor` and a generation, move the pin.
+
+### Disk
+
+Applied by `update` and `prune`. Either at `0` disables that pass.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `CACHE_KEEP_DAYS` | `7` | Drops build cache untouched for that long. |
+| `CACHE_MAX_GB` | `40` | Caps total build cache size. |
+
+The cap is the one that matters if you rebuild often, because the age filter measures last use and a frequent rebuild keeps every layer fresh.
 
 ## What it looks like
 
@@ -242,22 +284,10 @@ Start with `./spark-comfyui.sh doctor`; every failure names its fix. Common ones
 - Custom nodes run as a non-root user with all capabilities dropped and only your content directories and the GPU visible. A malicious node cannot read your SSH keys or anything else on the host.
 - The image is reproducible from this repo: both base images pinned by digest as well as tag, pinned ComfyUI commit, pinned SageAttention commit, sha256-pinned onnxruntime wheel from PyPI. `update --rollback` returns to the previous image atomically.
 - **`install` and `update` seed `comfyui-nodes.list` with one active entry**, so a fresh install, and an upgrade of an existing one, downloads and runs one third-party node from the Comfy Registry ([comfyui-workflow-models-downloader](https://registry.comfy.org/publishers/slahiri/nodes/comfyui-workflow-models-downloader)). Both print the file when they write it. Comment the line out before your next `run` if you want an install that executes no third-party node code. Everything the containment above says still applies to it.
-
 - The UI is published on every interface by default, so anything on your LAN can reach it. `BIND_ADDR=127.0.0.1` restricts it to the box itself; reach it from elsewhere over an SSH tunnel.
 
 > [!WARNING]
 > ComfyUI has no authentication. Manager's `personal_cloud` mode is fine on a trusted LAN. Do not expose the port to the internet.
-
-<div align="center">
-
-<a href="https://www.star-history.com/#bjarkebolding/spark-comfyui&amp;Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=bjarkebolding/spark-comfyui&amp;type=Date&amp;theme=dark">
-    <img alt="Star history for bjarkebolding/spark-comfyui" src="https://api.star-history.com/svg?repos=bjarkebolding/spark-comfyui&amp;type=Date" width="600">
-  </picture>
-</a>
-
-</div>
 
 ---
 
