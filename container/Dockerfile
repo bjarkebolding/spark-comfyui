@@ -39,6 +39,24 @@ ARG CUDA_IMAGE=nvidia/cuda:13.0.3-devel-ubuntu24.04@sha256:b7ae301dea2c162444795
 # other one, instead of hiding as a literal 150 lines down.
 ARG RUNTIME_IMAGE=ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
 ARG TORCH_INDEX=https://download.pytorch.org/whl/cu130
+# The torch trio is PINNED, and this was the last unpinned input in the file.
+# On 2026-09-05 a remote PyTorch release (2.14.0) broke every cold build with
+# no change on our side: SageAttention could not compile against it. That was
+# the loud failure. The quiet one is worse, because torch is the most
+# behaviour-defining dependency here and every measured number in CLAUDE.md
+# (the attention A/B, the aimdo and get_free_memory findings, NVFP4) was taken
+# on 2.13.0. An unannounced bump hands the user a different machine from the
+# one those numbers describe, which is exactly the silent degradation golden
+# rule 5 forbids.
+#
+# Pinned does NOT mean frozen. Emptying these three restores floating
+# behaviour, which is precisely what 'update --torch' does, and 'doctor'
+# reports when a newer torch exists so the decision gets made rather than
+# forgotten. Moving the pin is a deliberate edit with a field test behind it,
+# same policy as SAGE_REF.
+ARG TORCH_VERSION=2.13.0
+ARG TORCHVISION_VERSION=0.28.0
+ARG TORCHAUDIO_VERSION=2.11.0
 ARG REPO_URL=https://github.com/Comfy-Org/ComfyUI.git
 ARG COMFY_SHA=master
 ARG SAGE_REPO=https://github.com/thu-ml/SageAttention.git
@@ -111,9 +129,18 @@ ENV PIP_DEFAULT_TIMEOUT=120 \
 RUN python3 -m venv /opt/comfyui-env
 ENV VIRTUAL_ENV=/opt/comfyui-env
 ENV PATH=/opt/comfyui-env/bin:${PATH}
+ARG TORCH_VERSION
+ARG TORCHVISION_VERSION
+ARG TORCHAUDIO_VERSION
+# The ${VAR:+==${VAR}} form is what makes an EMPTY arg mean "unpinned", so
+# 'update --torch' can hand back the floating behaviour by passing nothing.
 RUN --mount=type=cache,target=/home/comfy/.cache/pip,uid=1000 \
     pip install --upgrade pip wheel \
- && pip install torch torchvision torchaudio --index-url ${TORCH_INDEX}
+ && pip install \
+      "torch${TORCH_VERSION:+==${TORCH_VERSION}}" \
+      "torchvision${TORCHVISION_VERSION:+==${TORCHVISION_VERSION}}" \
+      "torchaudio${TORCHAUDIO_VERSION:+==${TORCHAUDIO_VERSION}}" \
+      --index-url ${TORCH_INDEX}
 
 # --------------------------------------------------------------------------
 FROM torch AS sage
@@ -122,12 +149,27 @@ ARG SAGE_REF
 ARG TORCH_CUDA_ARCH_LIST
 # Native sm_121 SageAttention, pinned to SAGE_REF (compile only; the live
 # kernel verification happens in the entrypoint, where a GPU exists).
+#
+# CXX_APPEND_FLAGS / NVCC_APPEND_FLAGS are SageAttention's OWN documented
+# escape hatch (setup.py reads both and appends them AFTER its hardcoded
+# flags), and the last -std wins for gcc and nvcc. That matters because
+# setup.py hardcodes -std=c++17 while torch 2.14.0 raised its floor to C++20:
+# torch/csrc/api/include/torch/all.h and ATen/ATen.h both #error out below
+# 202002L, where 2.13.0 only wanted 201703L. Field-reported 2026-09-05 and
+# reproduced here.
+#
+# Do NOT "fix" this by sed-ing setup.py. Patching upstream source buys a
+# maintenance burden that this env knob does not, and it breaks silently if
+# SageAttention ever restructures the file. Setting the standard explicitly
+# is also what torch itself does: torch/utils/cpp_extension.py has compiled
+# extensions with -std=c++20 since at least 2.13.
 RUN --mount=type=cache,target=/home/comfy/.cache/pip,uid=1000 \
     git clone ${SAGE_REPO} /opt/SageAttention \
  && git -C /opt/SageAttention checkout ${SAGE_REF} \
  && pip install ninja packaging \
  && cd /opt/SageAttention \
- && TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} MAX_JOBS=$(nproc) \
+ && CXX_APPEND_FLAGS="-std=c++20" NVCC_APPEND_FLAGS="-std=c++20" \
+    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} MAX_JOBS=$(nproc) \
       pip install --no-build-isolation --no-deps .
 
 # --------------------------------------------------------------------------

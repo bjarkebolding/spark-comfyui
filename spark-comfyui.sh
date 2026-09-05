@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.08.29.2 | License: MIT
+#  Version 2026.09.05 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -131,7 +131,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.08.29.2"
+VERSION="2026.09.05"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -149,6 +149,14 @@ BASE_DIR="${BASE_DIR:-$(dirname "$SELF")}"
 SAGE_REF="${SAGE_REF:-d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5}"
 REPO_URL="${REPO_URL:-https://github.com/Comfy-Org/ComfyUI.git}"
 TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu130}"
+# The torch trio, pinned. torch was the last input here that floated, and on
+# 2026-09-05 a remote PyTorch release broke every cold build with no change on
+# our side. Pinned is not frozen: 'update --torch' passes these EMPTY, which
+# restores the floating behaviour, and 'doctor' says when a newer torch exists
+# so the bump is a decision rather than an accident. See container/Dockerfile.
+TORCH_VERSION="${TORCH_VERSION:-2.13.0}"
+TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.28.0}"
+TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-2.11.0}"
 # GPU onnxruntime for the preprocessor nodes. The official PyPI wheel, since
 # PyPI GPU packages became CUDA 13 builds in 1.27 and aarch64 wheels came with
 # them; before 2026-08-29 this was a community sm_121 build hosted by one
@@ -1598,6 +1606,9 @@ unreachable) — check the network and re-run"
     --provenance=false \
     -f "$BASE_DIR/container/Dockerfile" \
     --build-arg TORCH_INDEX="$TORCH_INDEX" \
+    --build-arg TORCH_VERSION="$TORCH_VERSION" \
+    --build-arg TORCHVISION_VERSION="$TORCHVISION_VERSION" \
+    --build-arg TORCHAUDIO_VERSION="$TORCHAUDIO_VERSION" \
     --build-arg REPO_URL="$REPO_URL" \
     --build-arg COMFY_SHA="$comfy_sha" \
     --build-arg SAGE_REF="$SAGE_REF" \
@@ -1607,6 +1618,31 @@ unreachable) — check the network and re-run"
     "$BASE_DIR"
   log "Image ready: $CONTAINER_IMAGE:latest"
   echo "  Launch it: $0 run"
+}
+
+# The torch version the IMAGE actually has, read from package metadata so it
+# costs no torch import. Reality, not the TORCH_VERSION we asked for: the two
+# differ the moment someone builds with 'update --torch' or an override.
+_image_torch_version() {
+  docker run --rm --entrypoint python "$CONTAINER_IMAGE:latest" \
+    -c 'import importlib.metadata as m; print(m.version("torch"))' 2>/dev/null || true
+}
+
+# Newest torch on the configured index for this image's platform (cp312
+# aarch64). wget, not curl: curl is priority=optional on DGX OS and only
+# present because something else pulled it in, which is why the recipe
+# downloader avoids it too. Empty output means "could not tell", never
+# "nothing newer" — the caller must stay quiet on it (golden rule 5).
+#
+# The trailing '|| true' is load-bearing, same lesson as _orphan_tags: under
+# 'set -euo pipefail' an offline box makes wget fail, or grep match nothing,
+# and the failing pipeline would take doctor down mid-run instead of simply
+# reporting that it could not tell. Caught by the offline test, not by review.
+_newest_torch_on_index() {
+  timeout 15 wget -qO- "${TORCH_INDEX%/}/torch/" 2>/dev/null \
+    | grep -oE 'torch-[0-9]+\.[0-9]+\.[0-9]+(%2B|\+)cu[0-9]+-cp312-cp312-manylinux[^"]*aarch64\.whl' \
+    | sed -E 's/^torch-([0-9]+\.[0-9]+\.[0-9]+).*/\1/' \
+    | sort -Vu | tail -1 || true
 }
 
 # Only :latest and :previous are tool-managed, and only keep-* tags are
@@ -2156,9 +2192,18 @@ cmd_update() {
   # so an unchanged rebuild never clobbers an older rollback point.
   # --torch: bust exactly the torch stage (fresh cu130 wheels); the
   # SageAttention stage sits on top of it and rebuilds automatically, same
-  # semantic as the native update --torch.
+  # semantic as the native update --torch. Since 2026-09-05 the trio is
+  # pinned, so --torch must ALSO drop the pin, otherwise busting the cache
+  # would just reinstall the same versions and the flag would mean nothing.
+  # Passing the args empty is what the Dockerfile's ${VAR:+==${VAR}} form
+  # reads as "unpinned", so this is the one supported way to float.
   local build_args=()
-  (( torch )) && build_args+=(--no-cache-filter=torch)
+  (( torch )) && build_args+=(
+    --no-cache-filter=torch
+    --build-arg TORCH_VERSION=
+    --build-arg TORCHVISION_VERSION=
+    --build-arg TORCHAUDIO_VERSION=
+  )
   local before after
   before="$(docker image inspect -f '{{.Id}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
   [[ -n "$before" ]] && docker tag "$before" "$CONTAINER_IMAGE:pre-update"
@@ -2262,6 +2307,25 @@ cmd_doctor() {
       info "image is at upstream ComfyUI master HEAD"
     else
       info "upstream ComfyUI master has moved (now ${upsha:0:12}) — a rebuild picks it up: $0 update"
+    fi
+    # torch drift, the same shape as the ComfyUI check above and for the same
+    # reason: the trio is pinned, so without this the pin would quietly go
+    # stale and nobody would know a newer torch existed. Reports what the
+    # image HAS against what the index offers, so it states reality rather
+    # than intent. An unreachable index is missing information, not an alarm.
+    local itorch ntorch
+    itorch="$(_image_torch_version)"
+    if [[ -n "$itorch" ]]; then
+      ntorch="$(_newest_torch_on_index)"
+      if [[ -z "$ntorch" ]]; then
+        info "torch ${itorch} (index unreachable — newer-version check skipped)"
+      elif [[ "${itorch%%+*}" == "$ntorch" ]]; then
+        info "torch ${itorch} is the newest on the index"
+      else
+        info "torch ${itorch}; ${ntorch} is now on the index — try it with: $0 update --torch
+  (that ignores the pin; if it passes doctor and a generation, move
+   TORCH_VERSION in container/Dockerfile)"
+      fi
     fi
     docker image inspect "$CONTAINER_IMAGE:previous" >/dev/null 2>&1 \
       && info "rollback point present ($CONTAINER_IMAGE:previous)" \
