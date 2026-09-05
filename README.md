@@ -248,6 +248,17 @@ Start with `./spark-comfyui.sh doctor`; every failure names its fix. Common ones
 > [!WARNING]
 > ComfyUI has no authentication. Manager's `personal_cloud` mode is fine on a trusted LAN. Do not expose the port to the internet.
 
+<div align="center">
+
+<a href="https://www.star-history.com/#bjarkebolding/spark-comfyui&amp;Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=bjarkebolding/spark-comfyui&amp;type=Date&amp;theme=dark">
+    <img alt="Star history for bjarkebolding/spark-comfyui" src="https://api.star-history.com/svg?repos=bjarkebolding/spark-comfyui&amp;type=Date" width="600">
+  </picture>
+</a>
+
+</div>
+
 ---
 
 MIT, see [LICENSE](LICENSE). The GB10 knowledge here comes from the NVIDIA DGX Spark developer forums, the [dgx-spark-playbooks](https://github.com/NVIDIA/dgx-spark-playbooks), and the community projects that mapped this hardware in public.
