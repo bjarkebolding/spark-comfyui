@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.09.05 | License: MIT
+#  Version 2026.09.05.1 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -42,11 +42,17 @@
 #                              (pr:<N> | branch:<name> | remote:<url>
 #                              <branch>) are merged on top of upstream
 #                              inside the image build.
-#    doctor                    Health check: self/update probe, host (driver,
+#    doctor [--cold]           Health check: self/update probe, host (driver,
 #                              docker runtime, image age, drift, swap,
 #                              backups), then the live GPU gates (torch CUDA,
 #                              SageAttention sm_121 kernel, GPU onnxruntime,
 #                              NVFP4) run inside a throwaway container.
+#                              --cold adds the cold-build canary: rebuild the
+#                              ComfyUI stage against upstream master as it is
+#                              right now, which is what a NEW install would
+#                              get. Your cached layers hide that path, so it
+#                              is the one failure nobody here can see. Adds
+#                              about 3 min; opt-in for that reason.
 #    status [--watch|-w [SEC]] One-page glance: process, GPU, memory, image.
 #                              --watch shows a live dashboard (sparkline
 #                              timeseries: temp/power/clock/util/RAM/CPU,
@@ -131,7 +137,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.09.05"
+VERSION="2026.09.05.1"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -1582,13 +1588,47 @@ the NVIDIA Container Toolkit, then re-run."
 passthrough may fail (install/configure the NVIDIA Container Toolkit)"
 }
 
+# Current upstream ComfyUI master, or empty if unreachable. The '|| true' is
+# load-bearing: under 'set -euo pipefail' a failed ls-remote would otherwise
+# take the caller down at the assignment, before it could print its own
+# message. Callers decide what empty means — cmd_build dies, the cold-build
+# check just skips.
+_resolve_comfy_master() {
+  timeout "${1:-30}" git ls-remote "$REPO_URL" refs/heads/master 2>/dev/null \
+    | awk 'NR==1{print $1}' || true
+}
+
+# The build-arg set, in one place, because two callers must build the SAME
+# image configuration: cmd_build, and the cold-build check in doctor. If they
+# drifted, the check would quietly be testing something other than what we
+# ship. Takes the resolved ComfyUI sha; fills IMG_BUILD_ARGS.
+_image_build_args() {
+  IMG_BUILD_ARGS=(
+    # --provenance=false: buildx otherwise attaches a provenance attestation
+    # stamped with the build time, giving every build a fresh manifest digest
+    # even when all layers are cached and the content is identical — which
+    # breaks cmd_update's changed-vs-current comparison
+    # (field-diagnosed 2026-07-20: two builds, same config timestamp,
+    # different "image IDs").
+    --provenance=false
+    -f "$BASE_DIR/container/Dockerfile"
+    --build-arg TORCH_INDEX="$TORCH_INDEX"
+    --build-arg TORCH_VERSION="$TORCH_VERSION"
+    --build-arg TORCHVISION_VERSION="$TORCHVISION_VERSION"
+    --build-arg TORCHAUDIO_VERSION="$TORCHAUDIO_VERSION"
+    --build-arg REPO_URL="$REPO_URL"
+    --build-arg COMFY_SHA="$1"
+    --build-arg SAGE_REF="$SAGE_REF"
+    --build-arg ORT_WHEEL_URL="$ORT_WHEEL_URL"
+  )
+}
+
 cmd_build() {
   need_docker
   seed_mounts_conf
   log "Resolving upstream ComfyUI master"
   local comfy_sha
-  comfy_sha="$(timeout 30 git ls-remote "$REPO_URL" refs/heads/master 2>/dev/null \
-    | awk 'NR==1{print $1}')"
+  comfy_sha="$(_resolve_comfy_master)"
   [[ -n "$comfy_sha" ]] \
     || die "could not resolve ComfyUI master from $REPO_URL (offline or
 unreachable) — check the network and re-run"
@@ -1596,23 +1636,11 @@ unreachable) — check the network and re-run"
   echo "  First build downloads ~4 GB and compiles SageAttention; about"
   echo "  5 min on a Spark, longer on a slow link. Rebuilds reuse every"
   echo "  layer that didn't change."
-  # --provenance=false: buildx otherwise attaches a provenance attestation
-  # stamped with the build time, giving every build a fresh manifest digest
-  # even when all layers are cached and the content is identical — which
-  # breaks cmd_update's changed-vs-current comparison
-  # (field-diagnosed 2026-07-20: two builds, same config timestamp,
-  # different "image IDs").
+  # "$@" stays AFTER the shared args so a caller's override wins: that is how
+  # 'update --torch' hands back empty TORCH_* args to unpin the trio.
+  _image_build_args "$comfy_sha"
   docker build \
-    --provenance=false \
-    -f "$BASE_DIR/container/Dockerfile" \
-    --build-arg TORCH_INDEX="$TORCH_INDEX" \
-    --build-arg TORCH_VERSION="$TORCH_VERSION" \
-    --build-arg TORCHVISION_VERSION="$TORCHVISION_VERSION" \
-    --build-arg TORCHAUDIO_VERSION="$TORCHAUDIO_VERSION" \
-    --build-arg REPO_URL="$REPO_URL" \
-    --build-arg COMFY_SHA="$comfy_sha" \
-    --build-arg SAGE_REF="$SAGE_REF" \
-    --build-arg ORT_WHEEL_URL="$ORT_WHEEL_URL" \
+    "${IMG_BUILD_ARGS[@]}" \
     -t "$CONTAINER_IMAGE:latest" \
     "$@" \
     "$BASE_DIR"
@@ -2250,7 +2278,90 @@ the update: $0 stop && $0 run"
   fi
 }
 
+# The cold-build canary. Our image and a NEW USER'S image are not the same
+# build: BuildKit keeps our layers, so a stage that consumes a MOVING input
+# gets reused here and rebuilt from scratch there. ComfyUI master is that
+# moving input BY DESIGN (cmd_build resolves it fresh every build, because
+# tracking it is the point of the tool), so the gap is permanent and no
+# release-time gate closes it — nothing in our repo moves when upstream does.
+# Field-proven 2026-09-05, when a remote PyTorch release broke every cold
+# build and reached a forum reporter before it reached us, purely because our
+# torch layer had been cached since before that release existed.
+#
+# It rebuilds the ONE stage that consumes the moving inputs: the ComfyUI clone
+# at current master, the patch list merge, ComfyUI's requirements, the onnx
+# wheel, and the build-time mod pass — which is where a moved get_free_memory
+# anchor surfaces as skipped:anchor-not-found and fails the build loudly.
+#
+# Cheap ONLY because torch is pinned. With torch floating this meant a full
+# torch plus SageAttention rebuild every run; now 'final' is the only stage
+# that can move, about 3.5 min with torch and sage cached.
+#
+# The result is never tagged (only the exit code is the answer) and is deleted
+# by image id afterwards. Both halves matter: this host runs docker's
+# OVERLAYFS store, not the containerd one, so an untagged build result is NOT
+# garbage-collected the way :pre-update works around elsewhere — it lingers as
+# a dangling image, once per run. It reports ~35 GB but frees almost nothing
+# when removed, because the build cache still holds those layers; the reason
+# to clean it up anyway is that 'prune' trims that cache, and then these
+# records would be the only thing keeping 35 GB alive. Measured 2026-09-05
+# after the first three canary runs. Do not "simplify" the cleanup away on the
+# assumption that a tagless image reaps itself: on this driver it does not.
+cold_build_check() {
+  hdr "cold build (what a fresh install would get)"
+  local sha
+  sha="$(_resolve_comfy_master)"
+  if [[ -z "$sha" ]]; then
+    info "upstream ComfyUI unreachable — cold-build check skipped"
+    return 0
+  fi
+  local isha
+  isha="$(docker image inspect \
+    -f '{{index .Config.Labels "org.spark-comfyui.comfy-sha"}}' \
+    "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
+  if [[ -n "$isha" && "$isha" != "$sha" ]]; then
+    info "your image is at ${isha:0:12}; testing current master ${sha:0:12}"
+  else
+    info "testing current master ${sha:0:12}"
+  fi
+  echo "  rebuilding the ComfyUI stage from scratch, about 3 min..."
+  _image_build_args "$sha"
+  local blog; blog="$(mktemp)"
+  if docker build --target final --no-cache-filter=final \
+       -t "$CONTAINER_IMAGE:cold-check" \
+       "${IMG_BUILD_ARGS[@]}" "$BASE_DIR" >"$blog" 2>&1; then
+    ok "a fresh install builds against current ComfyUI master"
+    rm -f "$blog"
+  else
+    # Loud on purpose. This does NOT mean the running install is broken; it
+    # means the front door is, which is the failure nobody here can see.
+    bad "a fresh install would FAIL against current ComfyUI master (${sha:0:12})
+  your existing install is unaffected — this is the new-user path"
+    echo "  last lines of the build:"
+    tail -15 "$blog" | sed 's/^/    /'
+    echo "  full log kept at: $blog"
+  fi
+  # Drop the throwaway tag. Removing by TAG rather than by image id is not a
+  # style choice: --iidfile writes the MANIFEST digest under this BuildKit,
+  # which is a different value from the local image id, so 'docker rmi' on it
+  # silently matches nothing and the image lingers (measured 2026-09-05:
+  # iidfile said 204cfdb43c09, the dangling image was 6828fa0b352f). A tag is
+  # unambiguous, and if this ever dies before cleaning up, ':cold-check' is
+  # not :latest/:previous/keep-* so 'prune' already treats it as an orphan and
+  # reclaims it. That is the one exception to "never tag a build anything but
+  # :latest": this tag is written and deleted in the same function, never
+  # write-only.
+  docker rmi "$CONTAINER_IMAGE:cold-check" >/dev/null 2>&1 || true
+}
+
 cmd_doctor() {
+  local cold=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cold) cold=1; shift ;;
+      *) die "Unknown doctor option: $1 (valid: --cold)" ;;
+    esac
+  done
   need_docker
   # ok/bad increment these shared counters.
   PASS=0; FAIL=0
@@ -2298,9 +2409,14 @@ cmd_doctor() {
     csha="$(docker image inspect -f '{{index .Config.Labels "org.spark-comfyui.comfy-sha"}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
     created="$(docker image inspect -f '{{.Created}}' "$CONTAINER_IMAGE:latest" | cut -dT -f1)"
     ok "image $CONTAINER_IMAGE:latest (built $created, ComfyUI ${csha:0:12})"
+    # Through the helper for its '|| true': this line used to inline the same
+    # pipeline without it, so on an offline box 'set -euo pipefail' killed
+    # doctor here (exit 128) and the "unreachable" branch below could never
+    # actually run. Found 2026-09-05 by the cold-check negative control, not
+    # by reading it. Keeps the short 10s timeout; a health check should not
+    # sit on a hung network for 30.
     local upsha
-    upsha="$(timeout 10 git ls-remote "$REPO_URL" refs/heads/master 2>/dev/null \
-      | awk 'NR==1{print $1}')"
+    upsha="$(_resolve_comfy_master 10)"
     if [[ -z "$upsha" ]]; then
       info "upstream ComfyUI unreachable — image staleness unknown"
     elif [[ "$upsha" == "$csha" ]]; then
@@ -2551,6 +2667,9 @@ echo
 if [[ "$fails" -eq 0 ]]; then echo "All container gates passed."
 else echo "$fails gate(s) FAILED."; exit 1; fi
 EOS
+  # Last, because it is the only slow check here and everything above should
+  # have reported before you wait three minutes for this one.
+  if (( cold )); then cold_build_check; fi
   echo
   if [[ "$FAIL" -eq 0 && "$gate_rc" -eq 0 ]]; then
     echo "Host checks: $PASS passed. Everything healthy."
@@ -2635,7 +2754,7 @@ case "$CMD" in
   service)  cmd_service "$@" ;;
   stop)     cmd_stop ;;
   update)   cmd_update "$@" ;;
-  doctor)   cmd_doctor ;;
+  doctor)   cmd_doctor "$@" ;;
   status)   cmd_status "$@" ;;
   tune)     cmd_tune "$@" ;;
   backup)   cmd_backup "$@" ;;
@@ -2645,7 +2764,7 @@ case "$CMD" in
   recipe)   cmd_recipe "$@" ;;
   shell)    cmd_shell ;;
   # --- hidden backward-compat aliases (old command spellings still work) ---
-  verify)   cmd_doctor ;;
+  verify)   cmd_doctor "$@" ;;
   monitor)  cmd_status --watch ;;
   rollback) cmd_update --rollback ;;
   ""|-h|--help|help) usage ;;
