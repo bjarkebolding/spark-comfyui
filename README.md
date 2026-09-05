@@ -102,8 +102,8 @@ The VAE one has a flag form, `--no-bf16-vae`, which works with any command:
 
 | Variable | Default | What it does |
 |---|---|---|
-| `TORCH_VERSION` | `2.13.0` | Pinned so a PyTorch release can never change your stack without you asking. |
-| `TORCHVISION_VERSION` | `0.28.0` | Pinned alongside torch. |
+| `TORCH_VERSION` | `2.14.0` | Pinned so a PyTorch release can never change your stack without you asking. |
+| `TORCHVISION_VERSION` | `0.29.0` | Pinned alongside torch. |
 | `TORCHAUDIO_VERSION` | `2.11.0` | Pinned alongside torch. |
 
 `doctor` tells you when a newer torch is on the index, and `update --torch` builds against it, ignoring the pin. If that passes `doctor` and a generation, move the pin.

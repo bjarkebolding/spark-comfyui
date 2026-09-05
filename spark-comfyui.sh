@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.09.05.1 | License: MIT
+#  Version 2026.09.05.2 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -137,7 +137,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.09.05.1"
+VERSION="2026.09.05.2"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -160,8 +160,8 @@ TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu130}"
 # our side. Pinned is not frozen: 'update --torch' passes these EMPTY, which
 # restores the floating behaviour, and 'doctor' says when a newer torch exists
 # so the bump is a decision rather than an accident. See container/Dockerfile.
-TORCH_VERSION="${TORCH_VERSION:-2.13.0}"
-TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.28.0}"
+TORCH_VERSION="${TORCH_VERSION:-2.14.0}"
+TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.29.0}"
 TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-2.11.0}"
 # GPU onnxruntime for the preprocessor nodes. The official PyPI wheel, since
 # PyPI GPU packages became CUDA 13 builds in 1.27 and aarch64 wheels came with

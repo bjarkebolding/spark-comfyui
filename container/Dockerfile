@@ -54,8 +54,8 @@ ARG TORCH_INDEX=https://download.pytorch.org/whl/cu130
 # reports when a newer torch exists so the decision gets made rather than
 # forgotten. Moving the pin is a deliberate edit with a field test behind it,
 # same policy as SAGE_REF.
-ARG TORCH_VERSION=2.13.0
-ARG TORCHVISION_VERSION=0.28.0
+ARG TORCH_VERSION=2.14.0
+ARG TORCHVISION_VERSION=0.29.0
 ARG TORCHAUDIO_VERSION=2.11.0
 ARG REPO_URL=https://github.com/Comfy-Org/ComfyUI.git
 ARG COMFY_SHA=master
