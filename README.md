@@ -54,6 +54,7 @@ Models go in `data/models/checkpoints` (etc.). No venv, no system Python changes
 | `update [--torch] [--rollback] [--keep[=NAME]]` | Self-updates the tool, then rebuilds the image on current ComfyUI master (cached layers: minutes). The old image stays as `:previous`; `--rollback` swaps back instantly. `--torch` forces fresh PyTorch wheels. `--keep` also pins the image you are leaving as `:keep-NAME` (default: today's date), which survives every later update and `prune`. |
 | `doctor [--cold]` | Health check: tool and host (driver, docker, image, swap, backups), then the live GPU gates (torch CUDA, sm_121 SageAttention kernel, onnxruntime provider, NVFP4) inside a throwaway container. Every failure names its fix. `--cold` additionally rebuilds the ComfyUI stage against upstream master as it stands right now, which is what a fresh install would get and what your cached layers otherwise hide. Adds about 3 minutes. |
 | `status [--watch [SEC]]` | One-page glance, or a live sparkline dashboard with generation telemetry and a `session:` A/B summary. Every sample lands in `thermal_monitor.log`, the post-mortem trail for silent hard-reboots. |
+| `bind [ADDR\|any]` | Shows or sets where the UI port is published. `bind 127.0.0.1` records it in `spark-comfyui.bind` next to the script; `bind any` clears it back to docker's every-interface default. Read on every launch, so unlike an environment variable it is not forgotten by the next container create — which is exactly what `update` tells you to do, and the only moment the binding is decided. Takes effect there: `bind 127.0.0.1 && stop && run`. |
 | `tune [--clock-cap MHZ] [--persist]` <br> `tune --revert` | Host stability: swap off, persistence mode, optional clock cap (~2100 fixes overcurrent hard-reboots). `--revert` puts all of it back: swap on, clocks unlocked, persistence off, the boot unit and the sysctl line removed. |
 | `backup [--with-output] [FILE]` | Small tgz of workflows, settings, inputs, configs and the custom-node set. Models are manifested, never archived. Safe while running. |
 | `restore FILE` | Rebuilds from a backup: image if missing, content into `data/`, custom nodes re-cloned at pinned commits, missing models listed with sizes. |
@@ -79,10 +80,11 @@ Set at `run` or `service` time.
 | `SPARK_STATIC_VRAM` | `0` | `1` disables DynamicVRAM. |
 | `SHM_SIZE` | `16g` | The container's `/dev/shm` ceiling. The Spark figure for large tensor transfers. |
 | `PORT` | `8188` | Host port. |
-| `BIND_ADDR` | unset | Host interface the port is published on. Empty is docker's own behaviour and means every interface, because a Spark is a headless box you reach from a laptop. |
+| `BIND_ADDR` | unset | Host interface the port is published on, for THIS command only. Empty falls back to `spark-comfyui.bind` (see `bind`), and then to docker's own behaviour — every interface, because a Spark is a headless box you reach from a laptop. Prefer `bind`: this variable is gone by the next container create. |
 
 ```bash
-BIND_ADDR=127.0.0.1 ./spark-comfyui.sh service   # this box only
+./spark-comfyui.sh bind 127.0.0.1   # this box only, durably (then: stop && run)
+BIND_ADDR=127.0.0.1 ./spark-comfyui.sh service   # this box only, this once
 SPARK_ATTENTION=ck ./spark-comfyui.sh run        # try Comfy Kitchen INT8
 ```
 
@@ -284,7 +286,7 @@ Start with `./spark-comfyui.sh doctor`; every failure names its fix. Common ones
 - Custom nodes run as a non-root user with all capabilities dropped and only your content directories and the GPU visible. A malicious node cannot read your SSH keys or anything else on the host.
 - The image is reproducible from this repo: both base images pinned by digest as well as tag, pinned ComfyUI commit, pinned SageAttention commit, sha256-pinned onnxruntime wheel from PyPI. `update --rollback` returns to the previous image atomically.
 - **`install` and `update` seed `comfyui-nodes.list` with one active entry**, so a fresh install, and an upgrade of an existing one, downloads and runs one third-party node from the Comfy Registry ([comfyui-workflow-models-downloader](https://registry.comfy.org/publishers/slahiri/nodes/comfyui-workflow-models-downloader)). Both print the file when they write it. Comment the line out before your next `run` if you want an install that executes no third-party node code. Everything the containment above says still applies to it.
-- The UI is published on every interface by default, so anything on your LAN can reach it. `BIND_ADDR=127.0.0.1` restricts it to the box itself; reach it from elsewhere over an SSH tunnel.
+- The UI is published on every interface by default, so anything on your LAN can reach it. `bind 127.0.0.1` restricts it to the box itself for good; reach it from elsewhere over an SSH tunnel. Use `BIND_ADDR=127.0.0.1` only if you want the restriction for one command, because a container create — what `update` asks you to do — re-reads the value, and a shell variable set in that session is not part of it.
 
 > [!WARNING]
 > ComfyUI has no authentication. Manager's `personal_cloud` mode is fine on a trusted LAN. Do not expose the port to the internet.

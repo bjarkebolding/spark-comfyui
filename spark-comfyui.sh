@@ -71,6 +71,15 @@
 #                              the sysctl line removed. For sharing the box
 #                              with something else, or ruling the tuning out
 #                              while chasing a problem.
+#    bind [ADDR|any]           Show or set where the UI port is published, durably.
+#                              No argument prints the current binding; ADDR (e.g.
+#                              127.0.0.1) records it in spark-comfyui.bind next to
+#                              the script and 'any' clears it. The file is read on
+#                              every launch, so unlike an env var it cannot be
+#                              forgotten by the NEXT container create — which is
+#                              what 'update' tells you to do, and the only moment
+#                              the binding is decided. Applies at that create:
+#                                $0 bind 127.0.0.1 && $0 stop && $0 run
 #    recipe list|show|check|install|capture
 #                              Everything a workflow needs, as data: the
 #                              workflow, its custom nodes, and every model
@@ -185,7 +194,18 @@ PORT="${PORT:-8188}"
 # nothing by itself (container/entrypoint.sh says so at the launch line). The
 # publish flag in _container_run_args is the only thing that decides what the
 # network can reach.
+#
+# The environment is NOT the place to state it. The publish string is composed
+# on the host at CREATE time, so a binding that lives only in a caller's shell
+# is forgotten by every recreate — and recreating is exactly what 'update' tells
+# you to do ("$0 stop && $0 run"), and what a reboot-after-crash never does.
+# shellcheck disable=SC2034  # read via _read_bind_conf/_bind_addr below, and by
+# _container_run_args; assigned here only to document the default.
 BIND_ADDR="${BIND_ADDR:-}"
+# Durable form of the same setting: one line, next to the other per-box config.
+# Written by 'bind', read on every launch, survives anything that does not
+# delete the file.
+BIND_CONF="${BIND_CONF:-$BASE_DIR/spark-comfyui.bind}"
 
 # (pip network resilience used to be exported here. It never reached anything
 # after the container cut — no host-side pip exists, and docker forwards
@@ -356,6 +376,30 @@ TPL
   echo "Seeded node list: $NODES_LIST (1 entry: comfyui-workflow-models-downloader)"
 }
 
+# Seed the durable binding file. Deliberately seeded as a COMMENTED template
+# with no active value: an empty/missing file keeps docker's every-interface
+# default, which is what every existing install and every laptop-on-the-LAN
+# user expects. Opting in is one command (`$0 bind 127.0.0.1`), and it is worth
+# taking if this box is on a shared network, because ComfyUI has no
+# authentication of its own (README's security notes say so).
+seed_bind_conf() {
+  [[ -f "$BIND_CONF" ]] && return 0
+  cat > "$BIND_CONF" <<'TPL'
+# spark-comfyui.bind — where the UI port is published, for this box.
+# Written by '$0 bind ADDR'; read on every launch. The value here outranks
+# nothing except the environment: BIND_ADDR in the caller's shell wins, then
+# this file, then docker's default (every interface).
+#
+# Comment out (or delete) the line to go back to every interface.
+#
+# Published on this box only, reached from elsewhere over an SSH tunnel:
+#   ssh -N -L 8188:127.0.0.1:8188 you@spark
+# Worth doing on any shared network: ComfyUI itself has no authentication.
+# 127.0.0.1
+TPL
+  info "seeded binding config template: $BIND_CONF (no active value — every interface)"
+}
+
 
 install_self() {
   # The script anchors all paths to its own location (BASE_DIR), so wherever
@@ -403,6 +447,74 @@ $BASE_DIR?) — continuing with the current version. To update manually:
   git -C $BASE_DIR pull"
   fi
   return 0
+}
+
+# Read the durable binding, if one was recorded with 'bind'. Precedence is
+# BIND_ADDR (env) > spark-comfyui.bind (file) > empty (docker's default: every
+# interface). A malformed file is ignored rather than fatal — the same shape
+# check below still runs on whatever this returns, and refusing to start because
+# a one-line config is corrupt would be worse than falling back to the documented
+# default. Callers use `$(bind_addr)`, never $BIND_ADDR, so there is one rule.
+bind_addr() {
+  local v="${BIND_ADDR:-}"
+  if [[ -z "$v" && -r "$BIND_CONF" ]]; then
+    # Strip comments and whitespace; first non-empty line wins. Tolerates a
+    # hand-written `BIND_ADDR=127.0.0.1` as well as a bare `127.0.0.1`.
+    while IFS= read -r line; do
+      line="${line%%#*}"
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      [[ -n "$line" ]] || continue
+      v="${line#BIND_ADDR=}"
+      break
+    done < "$BIND_CONF"
+  fi
+  printf '%s\n' "${v%$'\r'}"
+}
+
+# Validate a binding value and write it durably, or clear it with 'bind any'.
+# Refusing an address that is not on this box is docker's job (it rejects the
+# publish loudly); this only catches the typo that would otherwise be swallowed
+# into the publish string and read as part of the port mapping — the same check
+# 'run' applies at launch.
+cmd_bind() {
+  need_docker
+  local want="${1:-}"
+  case "$want" in
+    ""|--show)
+      local cur; cur="$(bind_addr)"
+      if [[ -z "$cur" ]]; then
+        echo "Binding: every interface (docker's default) — this box and your LAN"
+      else
+        echo "Binding: $cur — published on that interface only"
+      fi
+      [[ -r "$BIND_CONF" ]] && echo "  from:   $BIND_CONF"
+      echo "  change: $0 bind 127.0.0.1     (this box only, reach it over an SSH tunnel)"
+      echo "          $0 bind any             (every interface, the default)"
+      echo "  Takes effect at the next container create: $0 stop && $0 run"
+      return 0
+      ;;
+    any|all|0.0.0.0)
+      rm -f "$BIND_CONF"
+      log "Binding cleared — the next create publishes on every interface"
+      return 0
+      ;;
+  esac
+  [[ -z "$want" ]] \
+    || [[ "$want" =~ ^[A-Za-z0-9._%-]+$ ]] \
+    || [[ "$want" =~ ^\[?[0-9A-Fa-f:]+$ ]] \
+    || die "bind takes a host IP or hostname, or 'any' (got: $want)"
+  {
+    echo "# spark-comfyui.bind — durable BIND_ADDR for this box, written by '$0 bind'."
+    echo "# One value; 'bind any' deletes this file and restores docker's default"
+    echo "# (every interface). Edited by hand just as happily."
+    echo "$want"
+  } > "$BIND_CONF"
+  log "Binding recorded: $want"
+  echo "  file:    $BIND_CONF"
+  echo "  Applies at the next container create: $0 stop && $0 run"
+  echo "  It then survives every restart and reboot by itself, and every future"
+  echo "  'update', because the value no longer depends on the caller's shell."
 }
 
 # =============================================================================
@@ -1135,6 +1247,14 @@ cmd_status() {
     nent="$(grep -cE '^[^#[:space:]]' "$NODES_LIST")"
     echo "  node list: $nent entr$( ((nent==1)) && echo y || echo ies) in $NODES_LIST"
   fi
+  # The binding is a per-box setting that decides what the LAN can reach, so it
+  # is reported where the other two per-box files are, not left to be inferred.
+  local bnd; bnd="$(bind_addr)"
+  if [[ -z "$bnd" ]]; then
+    echo "  binding:   every interface$([[ -r "$BIND_CONF" ]] && echo " (default — $BIND_CONF has no active value)")"
+  else
+    echo "  binding:   $bnd$([[ -n "${BIND_ADDR:-}" ]] && echo " (from BIND_ADDR)" || echo " (from $BIND_CONF)")"
+  fi
   # The Manager config lives under the resolved user mount.
   resolve_mounts
   local cfg="" ci
@@ -1233,6 +1353,7 @@ cmd_backup() {
 
   [[ -f "$PATCH_LIST" ]] && cp -a "$PATCH_LIST" "$stage/comfyui-patches.list"
   [[ -f "$NODES_LIST" ]] && cp -a "$NODES_LIST" "$stage/comfyui-nodes.list"
+  [[ -f "$BIND_CONF" ]] && cp -a "$BIND_CONF" "$stage/spark-comfyui.bind"
   [[ -f "$mp_yaml" ]] && cp -a "$mp_yaml" "$stage/extra_model_paths.yaml"
 
   # Custom nodes: git clones become manifest lines (url + commit, re-cloned on
@@ -1273,6 +1394,7 @@ cmd_backup() {
   local members=(-C "$stage" meta models.manifest custom-nodes.manifest)
   [[ -f "$stage/comfyui-patches.list" ]]   && members+=(comfyui-patches.list)
   [[ -f "$stage/comfyui-nodes.list" ]]     && members+=(comfyui-nodes.list)
+  [[ -f "$stage/spark-comfyui.bind" ]]     && members+=(spark-comfyui.bind)
   [[ -f "$stage/extra_model_paths.yaml" ]] && members+=(extra_model_paths.yaml)
   [[ -d "$stage/custom_nodes_plain" ]]     && members+=(custom_nodes_plain)
   if [[ -d "$mp_user" ]]; then
@@ -1340,13 +1462,14 @@ cmd_restore() {
     echo "  merged $d/"
   done
   local src dst
-  for d in extra_model_paths.yaml comfyui-patches.list comfyui-nodes.list; do
+  for d in extra_model_paths.yaml comfyui-patches.list comfyui-nodes.list spark-comfyui.bind; do
     src="$stage/$d"
     [[ -f "$src" ]] || continue
     case "$d" in
       extra_model_paths.yaml) dst="$(_mount_path extra_model_paths.yaml)" ;;
       comfyui-patches.list)   dst="$PATCH_LIST" ;;
       comfyui-nodes.list)     dst="$NODES_LIST" ;;
+      spark-comfyui.bind)     dst="$BIND_CONF" ;;
       *) continue ;;   # a list entry without a case arm must not reuse $dst
     esac
     if [[ -f "$dst" ]] && ! cmp -s "$src" "$dst"; then
@@ -1794,10 +1917,12 @@ _container_run_args() {
   # that does not resolve, is docker's to reject and it does so loudly at
   # launch. This catches the typo that would otherwise be swallowed into the
   # publish string, where it reads as part of the port mapping.
-  [[ -z "$BIND_ADDR" ]] \
-    || [[ "$BIND_ADDR" =~ ^[A-Za-z0-9._%-]+$ ]] \
-    || [[ "$BIND_ADDR" =~ ^\[?[0-9A-Fa-f:]+\]?$ ]] \
-    || die "BIND_ADDR must be a host IP or hostname, e.g. 127.0.0.1 (got: $BIND_ADDR)"
+  local bind; bind="$(bind_addr)"
+  [[ -z "$bind" ]] \
+    || [[ "$bind" =~ ^[A-Za-z0-9._%-]+$ ]] \
+    || [[ "$bind" =~ ^\[?[0-9A-Fa-f:]+\]?$ ]] \
+    || die "BIND_ADDR must be a host IP or hostname, e.g. 127.0.0.1 (got: $bind)
+(set with '$0 bind <addr>', or correct BIND_ADDR in $BIND_CONF)"
   # The container runs as the CALLER, every launch. This is the whole of the
   # uid story: the image bakes no identity (see the Dockerfile header), and the
   # bind-mounted content is owned by whoever ran this script, because the host
@@ -1823,7 +1948,7 @@ the calling uid, and root would write root-owned files into your content"
     --shm-size "$SHM_SIZE"
     --cap-drop ALL
     --security-opt no-new-privileges
-    -p "$(_bind_host)${BIND_ADDR:+:}$PORT:8188"
+    -p "$(_bind_host)${bind:+:}$PORT:8188"
     -v "$CONTAINER_IMAGE-cache:/home/comfy/.cache"
     -e SPARK_BF16
     -e SPARK_BF16_VAE
@@ -1842,14 +1967,17 @@ the calling uid, and root would write root-owned files into your content"
   CRUN_ARGS+=("${CMOUNT_ARGS[@]}")
 }
 
-# BIND_ADDR in the form docker's -p and a URL both want: a bare IPv6 address
-# needs brackets, everything else passes through untouched. Empty stays empty,
-# which is docker's "every interface".
+# The resolved binding in the form docker's -p and a URL both want: a bare IPv6
+# address needs brackets, everything else passes through untouched. Empty stays
+# empty, which is docker's "every interface". Reads `bind_addr` (env, then the
+# durable file) so _ui_url and _container_run_args can never disagree about
+# what this box is bound to.
 _bind_host() {
-  case "$BIND_ADDR" in
-    ""|\[*\])  echo "$BIND_ADDR" ;;
-    *:*)        echo "[$BIND_ADDR]" ;;
-    *)          echo "$BIND_ADDR" ;;
+  local h; h="$(bind_addr)"
+  case "$h" in
+    ""|\[*\])  echo "$h" ;;
+    *:*)        echo "[$h]" ;;
+    *)          echo "$h" ;;
   esac
 }
 
@@ -1918,6 +2046,11 @@ cmd_run() {
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   _container_run_args
   log "Launching containerized ComfyUI on $(_ui_url) (Ctrl-C stops it)"
+  local bnd; bnd="$(bind_addr)"
+  [[ -n "$bnd" ]] \
+    && echo "  Bound to $bnd — reach it from elsewhere over an SSH tunnel:" \
+    && echo "    ssh -N -L $PORT:127.0.0.1:$PORT $(whoami)@$(hostname -s)" \
+    || true
   # --rm: every launch starts from the immutable image; runtime pip state
   # lives at most until the container exits, and the cache volume keeps
   # downloads and compiled sm_121 kernels fast across recreation.
@@ -1955,6 +2088,11 @@ cmd_service() {
   docker run -d --restart unless-stopped "${CRUN_ARGS[@]}" \
     "$CONTAINER_IMAGE:latest" "$@" >/dev/null
   echo "  Serving on $(_ui_url); survives crashes and reboots."
+  local bnd; bnd="$(bind_addr)"
+  [[ -n "$bnd" ]] \
+    && echo "  Bound to $bnd — reach it from elsewhere over an SSH tunnel:" \
+    && echo "    ssh -N -L $PORT:127.0.0.1:$PORT $(whoami)@$(hostname -s)" \
+    || true
   (( $# == 0 )) || echo "  Extra args: $* (kept until the service is recreated)"
   echo "  Health:  docker ps shows 'healthy' once it is actually serving"
   echo "  Logs:    docker logs -f $CONTAINER_NAME"
@@ -1971,6 +2109,7 @@ cmd_install() {
   seed_mounts_conf
   seed_patch_list
   seed_nodes_list
+  seed_bind_conf
   mkdir -p "$DATA_DIR"
   cmd_build
   log "Done!"
@@ -2235,6 +2374,9 @@ cmd_update() {
   # when written, and 'status' shows the entry count, so the third-party
   # default never arrives silently.
   seed_nodes_list
+  # Same reason as the node list above: boxes that upgrade with 'update' rather
+  # than a fresh 'install' would otherwise never see this file.
+  seed_bind_conf
 
   # Self-update the tool first; its re-exec lands back in this update.
   self_update "$@"
@@ -2784,6 +2926,7 @@ case "$CMD" in
   doctor)   cmd_doctor "$@" ;;
   status)   cmd_status "$@" ;;
   tune)     cmd_tune "$@" ;;
+  bind)     cmd_bind "${1:-}" ;;
   backup)   cmd_backup "$@" ;;
   restore)  cmd_restore "$@" ;;
   prune)    cmd_prune "$@" ;;
@@ -2796,5 +2939,5 @@ case "$CMD" in
   rollback) cmd_update --rollback ;;
   ""|-h|--help|help) usage ;;
   -v|--version|version) echo "spark-comfyui $VERSION" ;;
-  *) die "Unknown command: $CMD (try: install | run | service | stop | update | doctor | status | tune | recipe | backup | restore | prune | reset | shell)" ;;
+  *) die "Unknown command: $CMD (try: install | run | service | stop | update | doctor | status | tune | bind | recipe | backup | restore | prune | reset | shell)" ;;
 esac

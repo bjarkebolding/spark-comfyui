@@ -17,6 +17,10 @@ comfyui-nodes.list
 data/
 spark-mounts.conf
 
+# Per-box port binding (seeded as a commented template; holds one address, so
+# it is as personal as the two lists above)
+spark-comfyui.bind
+
 # Byte-compiled python. The repo ships real .py files (lib/, mods/) and CI
 # byte-compiles them, so running the same check locally would otherwise dirty
 # the tree.
