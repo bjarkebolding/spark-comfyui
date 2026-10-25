@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.10.10.1 | License: MIT
+#  Version 2026.10.25 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -130,6 +130,11 @@
 #  file to switch the whole set for one invocation. Custom-node code runs
 #  confined: non-root, no capabilities, nothing mounted but your content.
 #
+#  Settings: run-time variables (BIND_ADDR, PORT, SHM_SIZE, SPARK_*) set in
+#  the shell last until the container is next created. Put them in
+#  spark-comfyui.conf as KEY = VALUE to keep them; the shell still wins for
+#  one command, and 'status' warns when the running container differs.
+#
 #  Typical day: install once -> run (or service) -> update now and then.
 #  Something feels wrong? -> doctor tells you what and how to fix it.
 #  Re-running install is safe: completed steps are skipped or refreshed.
@@ -139,7 +144,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.10.10.1"
+VERSION="2026.10.25"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -147,6 +152,49 @@ VERSION="2026.10.10.1"
 # Resolve the real location even if invoked via a symlink or a relative path.
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 BASE_DIR="${BASE_DIR:-$(dirname "$SELF")}"
+
+# Durable run-time settings for this box. Every variable below is read from
+# the caller's shell when the container is CREATED, and nowhere else, so a
+# value that lived only in one shell was silently dropped by the next
+# recreate, which is exactly what 'update' tells you to do (PR #3 found it for
+# BIND_ADDR; every key here had the same hole). The file is parsed, never
+# sourced, like spark-mounts.conf. A variable set in the environment, even to
+# empty, wins for that command. An unknown key or a malformed line stops the
+# script: a typo like BIND_ADRR that fell back to every interface would be the
+# very bug this exists to fix. Parsed here, before the defaults below, so
+# "set by the shell" and "not set at all" are still distinguishable; die() is
+# not defined yet, hence the inline error.
+SETTINGS_CONF="${SETTINGS_CONF:-$BASE_DIR/spark-comfyui.conf}"
+SETTINGS_KEYS="BIND_ADDR PORT SHM_SIZE SPARK_ATTENTION SPARK_RESERVE_VRAM SPARK_BF16 SPARK_BF16_VAE SPARK_STATIC_VRAM"
+SETTINGS_FROM_FILE=()
+_load_settings() {
+  [[ -f "$SETTINGS_CONF" ]] || return 0
+  local raw line key val n=0 seen=" "
+  _settings_fail() {
+    printf '\033[1;31m[error] %s\033[0m\n' "$SETTINGS_CONF line $n: $1" >&2
+    exit 1
+  }
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    n=$((n + 1))
+    line="${raw%$'\r'}"
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -n "$line" ]] || continue
+    [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]] \
+      || _settings_fail "expected KEY = VALUE (got: $line)"
+    key="${BASH_REMATCH[1]}" val="${BASH_REMATCH[2]}"
+    [[ " $SETTINGS_KEYS " == *" $key "* ]] \
+      || _settings_fail "unknown key '$key' (valid: $SETTINGS_KEYS)"
+    [[ "$seen" != *" $key "* ]] || _settings_fail "'$key' is set twice"
+    seen+="$key "
+    [[ -z "${!key+x}" ]] || continue
+    export "$key=$val"
+    SETTINGS_FROM_FILE+=("$key")
+  done < "$SETTINGS_CONF"
+  unset -f _settings_fail
+}
+_load_settings
 
 # All overridable via environment if you want them elsewhere.
 # Pinned, not tracking thu-ml/SageAttention's default branch: 3.x showed
@@ -178,8 +226,10 @@ PORT="${PORT:-8188}"
 # Host interface the UI port is published on. Empty is docker's own default:
 # every interface, which is what a headless Spark reached from a laptop needs,
 # and is why the default cannot change without silently breaking every
-# existing install. Set it to keep the UI off the LAN:
+# existing install. To keep the UI off the LAN for good, put
+# 'BIND_ADDR = 127.0.0.1' in spark-comfyui.conf (above); the shell form
 #   BIND_ADDR=127.0.0.1 ./spark-comfyui.sh service   # this box only
+# lasts only until the next container create.
 # The container always passes --listen 0.0.0.0 to main.py, and that stays
 # right: it is scoped to the container's own network namespace and exposes
 # nothing by itself (container/entrypoint.sh says so at the launch line). The
@@ -1100,6 +1150,13 @@ cmd_status() {
       local cargs
       cargs="$(docker inspect -f '{{join .Args " "}}' "$CONTAINER_NAME" 2>/dev/null || true)"
       [[ -z "$cargs" ]] || echo "  extra args: $cargs"
+      local drift
+      drift="$(_launch_drift)"
+      if [[ -n "$drift" ]]; then
+        warn "the running container differs from what the next launch would use:"
+        printf '%s\n' "$drift" | sed 's/^/    /'
+        echo "    apply with: $0 stop && $0 run   (or service)"
+      fi
     fi
     pgrep -af "main.py --listen" | grep -q "use-sage-attention" \
       && echo "  attention: SageAttention" || echo "  attention: PyTorch SDPA"
@@ -1134,6 +1191,11 @@ cmd_status() {
   if [[ -f "$NODES_LIST" ]] && grep -qE '^[^#[:space:]]' "$NODES_LIST"; then
     nent="$(grep -cE '^[^#[:space:]]' "$NODES_LIST")"
     echo "  node list: $nent entr$( ((nent==1)) && echo y || echo ies) in $NODES_LIST"
+  fi
+  if (( ${#SETTINGS_FROM_FILE[@]} )); then
+    local sk sline=""
+    for sk in "${SETTINGS_FROM_FILE[@]}"; do sline+=" $sk=${!sk}"; done
+    echo "  settings:${sline} (from $SETTINGS_CONF)"
   fi
   # The Manager config lives under the resolved user mount.
   resolve_mounts
@@ -1233,6 +1295,7 @@ cmd_backup() {
 
   [[ -f "$PATCH_LIST" ]] && cp -a "$PATCH_LIST" "$stage/comfyui-patches.list"
   [[ -f "$NODES_LIST" ]] && cp -a "$NODES_LIST" "$stage/comfyui-nodes.list"
+  [[ -f "$SETTINGS_CONF" ]] && cp -a "$SETTINGS_CONF" "$stage/spark-comfyui.conf"
   [[ -f "$mp_yaml" ]] && cp -a "$mp_yaml" "$stage/extra_model_paths.yaml"
 
   # Custom nodes: git clones become manifest lines (url + commit, re-cloned on
@@ -1273,6 +1336,7 @@ cmd_backup() {
   local members=(-C "$stage" meta models.manifest custom-nodes.manifest)
   [[ -f "$stage/comfyui-patches.list" ]]   && members+=(comfyui-patches.list)
   [[ -f "$stage/comfyui-nodes.list" ]]     && members+=(comfyui-nodes.list)
+  [[ -f "$stage/spark-comfyui.conf" ]]     && members+=(spark-comfyui.conf)
   [[ -f "$stage/extra_model_paths.yaml" ]] && members+=(extra_model_paths.yaml)
   [[ -d "$stage/custom_nodes_plain" ]]     && members+=(custom_nodes_plain)
   if [[ -d "$mp_user" ]]; then
@@ -1340,13 +1404,14 @@ cmd_restore() {
     echo "  merged $d/"
   done
   local src dst
-  for d in extra_model_paths.yaml comfyui-patches.list comfyui-nodes.list; do
+  for d in extra_model_paths.yaml comfyui-patches.list comfyui-nodes.list spark-comfyui.conf; do
     src="$stage/$d"
     [[ -f "$src" ]] || continue
     case "$d" in
       extra_model_paths.yaml) dst="$(_mount_path extra_model_paths.yaml)" ;;
       comfyui-patches.list)   dst="$PATCH_LIST" ;;
       comfyui-nodes.list)     dst="$NODES_LIST" ;;
+      spark-comfyui.conf)     dst="$SETTINGS_CONF" ;;
       *) continue ;;   # a list entry without a case arm must not reuse $dst
     esac
     if [[ -f "$dst" ]] && ! cmp -s "$src" "$dst"; then
@@ -1558,6 +1623,27 @@ _mount_path() {
     fi
   done
   return 1
+}
+
+seed_settings_conf() {
+  [[ -f "$SETTINGS_CONF" ]] && return 0
+  cat > "$SETTINGS_CONF" <<'EOF'
+# spark-comfyui.conf: run-time settings for this box, read on every launch.
+# Uncommented lines are KEY = VALUE. A variable set in the shell still wins,
+# for that one command. Changes apply at the next 'stop' and 'run' (or
+# 'service'); 'status' says when the running container differs.
+#
+# Publish the UI on this box only, and reach it over an SSH tunnel
+# (ssh -N -L 8188:127.0.0.1:8188 you@spark). ComfyUI has no authentication.
+# BIND_ADDR = 127.0.0.1
+#
+# Keep the VAE off bf16, needed for LTX-2.3 audio workflows:
+# SPARK_BF16_VAE = 0
+#
+# Also accepted: PORT, SHM_SIZE, SPARK_ATTENTION, SPARK_RESERVE_VRAM,
+# SPARK_BF16, SPARK_STATIC_VRAM. See the README for what each one does.
+EOF
+  info "seeded settings template: $SETTINGS_CONF"
 }
 
 seed_mounts_conf() {
@@ -1881,6 +1967,31 @@ _published_url() {
   esac
 }
 
+# Settings where the RUNNING container differs from what the next launch would
+# use, one "KEY running -> next" per line, nothing when they agree. Asked of
+# docker, never re-derived (same rule as _published_url): this is the one view
+# that shows a setting that was lost, or one that is configured but not yet
+# applied. SHM_SIZE is left out because docker stores it as bytes.
+_launch_drift() {
+  local fmt hip hport want k run cur
+  fmt='{{range (index .HostConfig.PortBindings "8188/tcp")}}{{.HostIp}} {{.HostPort}}{{end}}'
+  read -r hip hport < <(docker inspect -f "$fmt" "$CONTAINER_NAME" 2>/dev/null || true)
+  [[ -n "${hport:-}" ]] || return 0
+  want="${BIND_ADDR#[}"; want="${want%]}"
+  [[ "$hip" == "0.0.0.0" || "$hip" == "::" ]] && hip=""
+  [[ "$want" == "0.0.0.0" || "$want" == "::" ]] && want=""
+  [[ "$hip" == "$want" ]] || echo "BIND_ADDR ${hip:-every interface} -> ${want:-every interface}"
+  [[ "$hport" == "$PORT" ]] || echo "PORT $hport -> $PORT"
+  local env
+  env="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+  for k in $SETTINGS_KEYS; do
+    [[ "$k" == SPARK_* ]] || continue
+    run="$(printf '%s\n' "$env" | sed -n "s/^$k=//p" | head -1)"
+    cur="${!k-}"
+    [[ "$run" == "$cur" ]] || echo "$k ${run:-unset} -> ${cur:-unset}"
+  done
+}
+
 # The content mounts on their own, as docker -v flags in CMOUNT_ARGS: the
 # resolved USER_CONTENT set plus any extra mounts, and nothing else. Split out
 # of _container_run_args so doctor can mount exactly what a launch mounts
@@ -1971,6 +2082,7 @@ cmd_install() {
   seed_mounts_conf
   seed_patch_list
   seed_nodes_list
+  seed_settings_conf
   mkdir -p "$DATA_DIR"
   cmd_build
   log "Done!"
@@ -2235,6 +2347,9 @@ cmd_update() {
   # when written, and 'status' shows the entry count, so the third-party
   # default never arrives silently.
   seed_nodes_list
+  # The settings template too, for the same reason: it is where a durable
+  # BIND_ADDR goes, and an existing box would otherwise never learn it exists.
+  seed_settings_conf
 
   # Self-update the tool first; its re-exec lands back in this update.
   self_update "$@"

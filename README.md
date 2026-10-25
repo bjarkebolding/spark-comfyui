@@ -68,7 +68,7 @@ Everything is an environment variable, so nothing needs editing to try something
 
 ### Runtime
 
-Set at `run` or `service` time.
+Set at `run` or `service` time. A variable set in the shell lasts until the container is next created, which `update` asks you to do. To make one stick, put it in `spark-comfyui.conf` next to the script as `KEY = VALUE`. `install` and `update` seed a commented template, and a variable set in the shell still wins for that one command.
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -82,9 +82,17 @@ Set at `run` or `service` time.
 | `BIND_ADDR` | unset | Host interface the port is published on. Empty is docker's own behaviour and means every interface, because a Spark is a headless box you reach from a laptop. |
 
 ```bash
-BIND_ADDR=127.0.0.1 ./spark-comfyui.sh service   # this box only
+BIND_ADDR=127.0.0.1 ./spark-comfyui.sh service   # this box only, until the next create
 SPARK_ATTENTION=ck ./spark-comfyui.sh run        # try Comfy Kitchen INT8
 ```
+
+```
+# spark-comfyui.conf: kept across every update and recreate
+BIND_ADDR = 127.0.0.1
+SPARK_BF16_VAE = 0
+```
+
+`status` lists what the file sets, and warns when the running container differs from what the next launch would use.
 
 `status` reads the binding back from the running container rather than from your environment, so it always prints a URL that actually works. Reaching a loopback-bound UI from elsewhere is then an SSH tunnel: `ssh -N -L 8188:127.0.0.1:8188 you@spark`.
 
@@ -284,7 +292,7 @@ Start with `./spark-comfyui.sh doctor`; every failure names its fix. Common ones
 - Custom nodes run as a non-root user with all capabilities dropped and only your content directories and the GPU visible. A malicious node cannot read your SSH keys or anything else on the host.
 - The image is reproducible from this repo: both base images pinned by digest as well as tag, pinned ComfyUI commit, pinned SageAttention commit, sha256-pinned onnxruntime wheel from PyPI. `update --rollback` returns to the previous image atomically.
 - **`install` and `update` seed `comfyui-nodes.list` with one active entry**, so a fresh install, and an upgrade of an existing one, downloads and runs one third-party node from the Comfy Registry ([comfyui-workflow-models-downloader](https://registry.comfy.org/publishers/slahiri/nodes/comfyui-workflow-models-downloader)). Both print the file when they write it. Comment the line out before your next `run` if you want an install that executes no third-party node code. Everything the containment above says still applies to it.
-- The UI is published on every interface by default, so anything on your LAN can reach it. `BIND_ADDR=127.0.0.1` restricts it to the box itself; reach it from elsewhere over an SSH tunnel.
+- The UI is published on every interface by default, so anything on your LAN can reach it. `BIND_ADDR = 127.0.0.1` in `spark-comfyui.conf` restricts it to the box itself; reach it from elsewhere over an SSH tunnel. Set only in the shell, the restriction is gone at the next container create.
 
 > [!WARNING]
 > ComfyUI has no authentication. Manager's `personal_cloud` mode is fine on a trusted LAN. Do not expose the port to the internet.

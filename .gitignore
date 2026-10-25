@@ -16,6 +16,7 @@ comfyui-nodes.list
 # configuration (seeded as a commented template, like the patch list)
 data/
 spark-mounts.conf
+spark-comfyui.conf
 
 # Byte-compiled python. The repo ships real .py files (lib/, mods/) and CI
 # byte-compiles them, so running the same check locally would otherwise dirty
