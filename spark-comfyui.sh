@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.10.25 | License: MIT
+#  Version 2026.10.25.1 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -144,7 +144,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.10.25"
+VERSION="2026.10.25.1"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -619,10 +619,17 @@ cmd_tune() {
       [[ -n "$lgc_line" ]] \
         && echo "  keeping previously persisted clock cap (${lgc_line##*-lgc })"
     fi
+    # Ordered on what the steps need, never After=multi-user.target. That
+    # target is only reached once the whole boot finishes, and on a headless
+    # DGX OS box plymouth-quit-wait can hold it for hours or for good: on
+    # sparky the unit ran 6h after one boot and never during the next
+    # (2026-10-25), with swap on the whole time. swap.target means swapoff has
+    # the fstab swap to turn off; nvidia-persistenced starts with the driver.
+    # WantedBy below only says "at boot", it does not order anything.
     sudo tee "$unit" >/dev/null <<UNIT
 [Unit]
 Description=DGX Spark tuning for ComfyUI (swap off, persistence mode, clocks)
-After=multi-user.target
+After=swap.target nvidia-persistenced.service
 
 [Service]
 Type=oneshot
@@ -2729,6 +2736,13 @@ cmd_doctor() {
     warn "swap is ENABLED on the host — heavy workloads can freeze the box ($0 tune)"
   else
     ok "swap disabled on the host"
+  fi
+  # A unit persisted before 2026.10.25 waits for multi-user.target, which a
+  # headless box may reach hours late or never, so the boot tuning silently
+  # does not happen. Rewriting it is one command.
+  if grep -qx 'After=multi-user.target' /etc/systemd/system/comfyui-tune.service 2>/dev/null; then
+    warn "comfyui-tune.service waits for the end of boot and may never run —
+  rewrite it with: $0 tune --persist"
   fi
   # Informational, not pass/fail: when the newest backup was taken. The -d
   # gate covers the never-backed-up install; the || true covers a nonzero
