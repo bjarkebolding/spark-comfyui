@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  spark-comfyui.sh — ComfyUI on NVIDIA DGX Spark (GB10 Grace Blackwell)
-#  Version 2026.10.25.1 | License: MIT
+#  Version 2026.11.15 | License: MIT
 # =============================================================================
 #  Runs ComfyUI in a hardened container tuned for the Spark's aarch64 CPU,
 #  sm_121 GPU and 128 GB unified memory. One script for the whole lifecycle;
@@ -144,7 +144,7 @@ set -euo pipefail
 # Date versioning (CalVer): YYYY.MM.DD, with .N appended for a second
 # behavior-changing release on the same day. Bumped in the same push as any
 # behavior change (pushing to main IS releasing); docs-only pushes don't bump.
-VERSION="2026.10.25.1"
+VERSION="2026.11.15"
 
 # ----------------------------- Configuration --------------------------------
 # Everything is self-contained under the directory this script lives in, so
@@ -1136,7 +1136,7 @@ cmd_status() {
   hdr "Process"
   if pgrep -f "main.py --listen" >/dev/null 2>&1; then
     local pid where=""
-    pid="$(pgrep -f 'main.py --listen' | head -1)"
+    pid="$(pgrep -f 'main.py --listen' | head -1 || true)"
     # Container processes are visible in the host process table, so the
     # same pgrep finds both worlds; the tag says which one this is.
     if command -v docker >/dev/null 2>&1 \
@@ -1185,7 +1185,7 @@ cmd_status() {
     # The image label carries the commit (no host checkout exists).
     local csha built
     csha="$(docker image inspect -f '{{index .Config.Labels "org.spark-comfyui.comfy-sha"}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
-    built="$(docker image inspect -f '{{.Created}}' "$CONTAINER_IMAGE:latest" | cut -dT -f1)"
+    built="$(docker image inspect -f '{{.Created}}' "$CONTAINER_IMAGE:latest" 2>/dev/null | cut -dT -f1 || true)"
     echo "  ComfyUI: ${csha:0:12} (image $CONTAINER_IMAGE:latest, built $built)"
   else
     echo "  ComfyUI: no image built yet (run: $0 install)"
@@ -2556,7 +2556,7 @@ cmd_doctor() {
   if docker image inspect "$CONTAINER_IMAGE:latest" >/dev/null 2>&1; then
     local csha created
     csha="$(docker image inspect -f '{{index .Config.Labels "org.spark-comfyui.comfy-sha"}}' "$CONTAINER_IMAGE:latest" 2>/dev/null || true)"
-    created="$(docker image inspect -f '{{.Created}}' "$CONTAINER_IMAGE:latest" | cut -dT -f1)"
+    created="$(docker image inspect -f '{{.Created}}' "$CONTAINER_IMAGE:latest" 2>/dev/null | cut -dT -f1 || true)"
     ok "image $CONTAINER_IMAGE:latest (built $created, ComfyUI ${csha:0:12})"
     # Through the helper for its '|| true': this line used to inline the same
     # pipeline without it, so on an offline box 'set -euo pipefail' killed
@@ -2703,8 +2703,8 @@ cmd_doctor() {
     # a docker restart policy only ever reacts to an exit, never to a hang.
     # No arm matches on an image built before the healthcheck existed.
     case "$(_container_health)" in
-      healthy)   ok "container answers on /system_stats" ;;
-      unhealthy) bad "container is up but not answering on /system_stats — hung
+      healthy)   ok "container answers HTTP (health check)" ;;
+      unhealthy) bad "container is up but not answering HTTP — hung
   or failed after launch; read: docker logs $CONTAINER_NAME" ;;
       starting)  info "container is inside its health start window (custom-node
   requirements and the GPU gates run before main.py binds the port)" ;;

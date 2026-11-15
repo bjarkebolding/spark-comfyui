@@ -12,3 +12,5 @@
 !container
 !container/**
 !comfyui-patches.list
+# Local byte-compiled leftovers stay out of the image.
+**/__pycache__

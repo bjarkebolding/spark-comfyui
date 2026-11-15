@@ -172,6 +172,15 @@ RUN --mount=type=cache,target=/home/comfy/.cache/pip,uid=1000 \
     TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} MAX_JOBS=$(nproc) \
       pip install --no-build-isolation --no-deps .
 
+# Group 0 rights over the venv here, where a ComfyUI bump keeps them cached.
+USER root
+RUN chgrp -R 0 /opt/comfyui-env \
+ && chmod -R g=u /opt/comfyui-env \
+ && find /opt/comfyui-env -type d -exec chmod g+s {} + \
+ && chgrp 0 /opt /opt/spark \
+ && chmod g=u,g+s /opt /opt/spark
+USER comfy
+
 # --------------------------------------------------------------------------
 FROM sage AS final
 ARG REPO_URL
@@ -183,29 +192,30 @@ ARG TORCH_INDEX
 # ComfyUI at the exact commit cmd_build resolved (the ARG value is
 # the cache key: a new upstream commit rebuilds from this layer down, the
 # torch and SageAttention stages above stay cached).
-RUN git clone ${REPO_URL} /opt/ComfyUI \
+# Steps that write under /opt use umask 002, so new files are born group writable.
+RUN umask 002 && git clone ${REPO_URL} /opt/ComfyUI \
  && git -C /opt/ComfyUI checkout ${COMFY_SHA}
 
 # The user's patch list (PRs/branches merged on top of the pinned commit).
 # The [t] glob is the standard optional-COPY trick: zero matches is not an
 # error, so a build without a patch list works. A changed list busts the
 # cache from here down, which is exactly the right rebuild scope.
-COPY --chown=comfy:comfy container/build-patches.sh comfyui-patches.lis[t] /opt/spark/
-RUN bash /opt/spark/build-patches.sh
+COPY --chown=comfy:0 container/build-patches.sh comfyui-patches.lis[t] /opt/spark/
+RUN umask 002 && bash /opt/spark/build-patches.sh
 
 RUN --mount=type=cache,target=/home/comfy/.cache/pip,uid=1000 \
-    pip install -r /opt/ComfyUI/requirements.txt \
+    umask 002 && pip install -r /opt/ComfyUI/requirements.txt \
  && pip install -r /opt/ComfyUI/manager_requirements.txt
 
 # Community sm_121 GPU onnxruntime; the #sha256= fragment makes pip verify
 # the exact bytes.
 RUN --mount=type=cache,target=/home/comfy/.cache/pip,uid=1000 \
-    pip install "${ORT_WHEEL_URL}"
+    umask 002 && pip install "${ORT_WHEEL_URL}"
 
 # The mod pass: setuptools-compat and unified-memory-free. Both need no GPU
 # and no user content, which is now the definition of a mod rather than a
 # property two of them happened to share.
-COPY --chown=comfy:comfy mods/ /opt/spark/mods/
+COPY --chown=comfy:0 mods/ /opt/spark/mods/
 # --chmod=755 is load-bearing, not tidiness. COPY reproduces the build-context
 # mode verbatim and the runtime stage carries it through, so a tree that
 # arrived without the execute bit (a downloaded zip, a copy that dropped
@@ -213,19 +223,17 @@ COPY --chown=comfy:comfy mods/ /opt/spark/mods/
 # with exit 0. The failure then surfaced at run time as an OCI "permission
 # denied" naming only a path inside the container. Field-reported 2026-08-05.
 # The image must not inherit that bit from the user's disk.
-COPY --chown=comfy:comfy --chmod=755 \
-     container/build-mods.sh container/entrypoint.sh \
-     container/manager-config.py container/gb10.sh container/resolve-node.py \
-     /opt/spark/
+# The launch-time scripts are copied in the runtime stage.
+COPY --chown=comfy:0 --chmod=775 container/build-mods.sh /opt/spark/
 ENV INSTALL_DIR=/opt/ComfyUI
 ENV VENV_DIR=/opt/comfyui-env
-RUN bash /opt/spark/build-mods.sh
+RUN umask 002 && bash /opt/spark/build-mods.sh
 
 # The exact torch trio this image shipped with, for ensure_torch_cuda's repair
 # at start. Read from the installed metadata, not the build args: after
 # 'update --torch' those args are empty, and the full version carries the local
 # tag, which matters because a CPU wheel 2.14.0+cpu satisfies a bare ==2.14.0.
-RUN python -c 'import importlib.metadata as m; \
+RUN umask 002 && python -c 'import importlib.metadata as m; \
 print("\n".join(f"{p}=={m.version(p)}" for p in ("torch", "torchvision", "torchaudio")))' \
       > /opt/spark/torch-pins.txt
 
@@ -242,10 +250,14 @@ print("\n".join(f"{p}=={m.version(p)}" for p in ("torch", "torchvision", "torcha
 # double the shipped image. Here it costs a build-stage layer that is never
 # shipped, because runtime is a fresh FROM ubuntu:24.04 that COPYs from this
 # stage, and a COPY writes new files at the mode of the source.
+#
+# Only entries that are wrong: a blanket recursive pass rewrote the whole venv
+# on every ComfyUI bump. Never follow a symlink out of /opt.
 USER root
-RUN chgrp -R 0 /opt \
- && chmod -R g=u /opt \
- && find /opt -type d -exec chmod g+s {} +
+RUN find /opt -path /opt/SageAttention -prune -o ! -group 0 -exec chgrp -h 0 {} + \
+ && find /opt -path /opt/SageAttention -prune -o ! -type l \( \( -perm -u=r ! -perm -g=r \) \
+      -o \( -perm -u=w ! -perm -g=w \) -o \( -perm -u=x ! -perm -g=x \) \) -exec chmod g=u {} + \
+ && find /opt -path /opt/SageAttention -prune -o -type d ! -perm -g+s -exec chmod g+s {} +
 USER comfy
 
 # --------------------------------------------------------------------------
@@ -261,10 +273,7 @@ USER comfy
 # The SageAttention build tree is NOT copied (246 MB of build residue; the
 # compiled package lives in the venv).
 FROM ${RUNTIME_IMAGE} AS runtime
-ARG COMFY_SHA
-ARG SAGE_REF
-ARG TORCH_INDEX
-ARG ORT_WHEEL_URL
+# Build args are declared after the last RUN, so a new COMFY_SHA keeps apt cached.
 ENV DEBIAN_FRONTEND=noninteractive
 # Two separate reasons this slim runtime image carries graphics libraries at
 # all, neither of which is about drawing anything:
@@ -305,6 +314,11 @@ COPY --from=final --chown=comfy:0 /opt/comfyui-env /opt/comfyui-env
 COPY --from=final --chown=comfy:0 /opt/ComfyUI /opt/ComfyUI
 COPY --from=final --chown=comfy:0 /opt/spark /opt/spark
 COPY --from=base /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
+# --chmod is load-bearing: never inherit a mode from the user's disk.
+COPY --chown=comfy:0 --chmod=775 \
+     container/entrypoint.sh container/manager-config.py container/gb10.sh \
+     container/resolve-node.py \
+     /opt/spark/
 
 # COPY creates the DESTINATION DIRECTORY itself at a default 0755 and ignores
 # the source directory's mode, so the three roots above land without the group
@@ -351,6 +365,10 @@ USER comfy
 # correctly with no torch import at all. Verified in the same pass that torch,
 # the SageAttention kernel gate, the NVFP4 gate and the stdlib C extensions
 # are all unaffected, i.e. nothing here shadows a system library.
+ARG COMFY_SHA
+ARG SAGE_REF
+ARG TORCH_INDEX
+ARG ORT_WHEEL_URL
 ENV LD_LIBRARY_PATH=/opt/comfyui-env/lib/python3.12/site-packages/nvidia/cu13/lib:/opt/comfyui-env/lib/python3.12/site-packages/nvidia/cudnn/lib
 ENV HOME=/home/comfy \
     USER=comfy \
@@ -395,7 +413,8 @@ EXPOSE 8188
 # docker, whose restart policy only ever reacts to an exit. This does NOT make
 # anything self-heal (restart policies ignore health by design) — it upgrades
 # "the process exists" into "the server answers", which is what 'status' and
-# 'doctor' report. /system_stats is a stock endpoint and needs no auth.
+# 'doctor' report. /queue, not /system_stats: that one takes the allocator lock
+# and can deadlock under DynamicVRAM (ComfyUI #17435).
 # start-period is generous because the entrypoint reconciles the registry
 # node list, installs custom-node requirements and runs the GPU gates before
 # main.py ever binds the port; a large node set legitimately takes minutes,
@@ -405,6 +424,6 @@ EXPOSE 8188
 # a sick server. Nothing self-heals on health anyway, so the only cost of a
 # wider window is later detection of a genuine hang.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8188/system_stats', timeout=4)" || exit 1
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8188/queue', timeout=4)" || exit 1
 
 ENTRYPOINT ["/opt/spark/entrypoint.sh"]

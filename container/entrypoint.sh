@@ -9,7 +9,8 @@
 # in container/gb10.sh and container/manager-config.py.
 set -euo pipefail
 
-log()  { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
+# Step headers show seconds since container start.
+log()  { printf '\n\033[1;32m==> %s\033[0m \033[2m[%ss]\033[0m\n' "$*" "$SECONDS"; }
 warn() { printf '\033[1;33m[warn] %s\033[0m\n' "$*"; }
 info() { printf '\033[1;36m[info] %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31m[error] %s\033[0m\n' "$*" >&2; exit 1; }
